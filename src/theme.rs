@@ -16,6 +16,9 @@ pub enum Theme {
     Gruvbox,
     Catppuccin,
     SolarizedLight,
+    AyuDark,
+    RosePine,
+    Everforest,
 }
 
 #[derive(Clone, Copy)]
@@ -34,7 +37,7 @@ pub struct Palette {
 }
 
 impl Theme {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 11] = [
         Self::Strata,
         Self::Ember,
         Self::Monochrome,
@@ -43,6 +46,9 @@ impl Theme {
         Self::Gruvbox,
         Self::Catppuccin,
         Self::SolarizedLight,
+        Self::AyuDark,
+        Self::RosePine,
+        Self::Everforest,
     ];
 
     pub fn name(self) -> &'static str {
@@ -55,6 +61,9 @@ impl Theme {
             Self::Gruvbox => "gruvbox",
             Self::Catppuccin => "catppuccin",
             Self::SolarizedLight => "solarized-light",
+            Self::AyuDark => "ayu-dark",
+            Self::RosePine => "rose-pine",
+            Self::Everforest => "everforest",
         }
     }
 
@@ -68,6 +77,9 @@ impl Theme {
             Self::Gruvbox => "Warm charcoal · earthy gold & aqua",
             Self::Catppuccin => "Mocha · soft teal & mauve",
             Self::SolarizedLight => "Warm ivory · blue & violet",
+            Self::AyuDark => "Ink black · amber & sky blue",
+            Self::RosePine => "Dusk violet · rose & iris",
+            Self::Everforest => "Forest charcoal · sage & sea green",
         }
     }
 
@@ -106,6 +118,18 @@ impl Theme {
             Self::SolarizedLight => [
                 0xeee8d5, 0xfdf6e3, 0xa8b4b2, 0x3c5158, 0x586e75, 0x006da8, 0x6c60aa, 0x526600,
                 0x986400, 0xc52c29, 0xd9dfd3,
+            ],
+            Self::AyuDark => [
+                0x0b0e14, 0x0f131a, 0x3c414a, 0xbfbdb6, 0x8a9199, 0xe6b450, 0x59c2ff, 0xaad94c,
+                0xff8f40, 0xf07178, 0x243447,
+            ],
+            Self::RosePine => [
+                0x191724, 0x1f1d2e, 0x403d52, 0xe0def4, 0x908caa, 0xebbcba, 0xc4a7e7, 0x9ccfd8,
+                0xf6c177, 0xeb6f92, 0x403d52,
+            ],
+            Self::Everforest => [
+                0x1e2326, 0x272e33, 0x495156, 0xd3c6aa, 0x9da9a0, 0xa7c080, 0x7fbbb3, 0xa7c080,
+                0xdbbc7f, 0xe67e80, 0x374145,
             ],
         };
         let [

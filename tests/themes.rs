@@ -10,8 +10,18 @@ fn theme_cli_is_usable_without_a_model_or_server() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap().lines().count(), 8);
-    for theme in ["ember", "monochrome", "solarized-light"] {
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().lines().count(),
+        11
+    );
+    for theme in [
+        "ember",
+        "monochrome",
+        "solarized-light",
+        "ayu-dark",
+        "rose-pine",
+        "everforest",
+    ] {
         let output = Command::new(binary)
             .args([
                 "--preview",

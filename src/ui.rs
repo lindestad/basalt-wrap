@@ -1355,6 +1355,15 @@ fn rgb(color: Color, fallback: Color) -> String {
 mod tests {
     use super::*;
     #[test]
+    fn theme_picker_keeps_last_palette_visible_in_a_short_terminal() {
+        let mut app = crate::model::demo();
+        app.theme = crate::theme::Theme::Everforest;
+        app.theme_picker = Some(crate::theme::Theme::Strata);
+        let text = snapshot(&app, 80, 14, false).unwrap();
+        assert!(text.contains("› everforest"));
+        assert!(text.contains("Enter apply"));
+    }
+    #[test]
     fn live_card_switches_prefill_decode_and_last_request_without_stale_rates() {
         let mut app = crate::model::demo();
         app.metrics.data["live"]["state"] = json!("reading");

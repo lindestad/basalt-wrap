@@ -268,7 +268,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
                 app.theme_notice = None;
             }
             KeyCode::Home | KeyCode::Char('g') => app.theme = theme::Theme::Strata,
-            KeyCode::End | KeyCode::Char('G') => app.theme = theme::Theme::SolarizedLight,
+            KeyCode::End | KeyCode::Char('G') => app.theme = *theme::Theme::ALL.last().unwrap(),
             KeyCode::Esc | KeyCode::Char('t') => {
                 app.theme = original;
                 app.theme_picker = None;
@@ -537,10 +537,10 @@ mod tests {
         assert!(!path.exists());
         key(&mut app, KeyCode::Char('t'));
         key(&mut app, KeyCode::Char('k'));
-        assert_eq!(app.theme, theme::Theme::SolarizedLight);
+        assert_eq!(app.theme, theme::Theme::Everforest);
         key(&mut app, KeyCode::Enter);
         assert!(app.theme_picker.is_none());
-        assert_eq!(theme::load(&path).unwrap(), theme::Theme::SolarizedLight);
+        assert_eq!(theme::load(&path).unwrap(), theme::Theme::Everforest);
     }
 
     #[test]
@@ -556,6 +556,24 @@ mod tests {
         key(&mut app, KeyCode::Char('l'));
         key(&mut app, KeyCode::Enter);
         assert_eq!(app.theme, theme::Theme::Monochrome);
+        assert!(app.theme_picker.is_none());
+    }
+
+    #[test]
+    fn theme_picker_reaches_new_palettes_and_tracks_the_catalog_end() {
+        let mut app = model::demo();
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.theme, theme::Theme::Everforest);
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.theme, theme::Theme::RosePine);
+        key(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.theme, theme::Theme::AyuDark);
+        key(&mut app, KeyCode::Home);
+        assert_eq!(app.theme, theme::Theme::Strata);
+        key(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.theme, theme::Theme::Everforest);
+        key(&mut app, KeyCode::Enter);
         assert!(app.theme_picker.is_none());
     }
 

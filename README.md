@@ -89,6 +89,9 @@ the model is generating.
 | `gruvbox` | Warm charcoal with earthy gold and aqua |
 | `catppuccin` | Mocha with soft teal and mauve |
 | `solarized-light` | Warm ivory with blue and violet accents |
+| `ayu-dark` | Ink black with amber and sky blue |
+| `rose-pine` | Dusk violet with rose and iris |
+| `everforest` | Forest charcoal with sage and sea green |
 
 ![Theme gallery](docs/themes.png)
 
@@ -114,8 +117,11 @@ palette.
 The inspired palettes adapt [Nord](https://www.nordtheme.com/docs/colors-and-palettes/),
 [Dracula](https://draculatheme.com/contribute),
 [Gruvbox](https://github.com/morhetz/gruvbox),
-[Catppuccin Mocha](https://github.com/catppuccin/catppuccin), and
-[Solarized](https://ethanschoonover.com/solarized/) for this dashboard.
+[Catppuccin Mocha](https://github.com/catppuccin/catppuccin),
+[Solarized](https://ethanschoonover.com/solarized/),
+[Ayu Dark](https://github.com/Shatur/neovim-ayu),
+[Rosé Pine](https://github.com/rose-pine/neovim), and
+[Everforest](https://github.com/sainnhe/everforest) for this dashboard.
 
 ## VRAM policy
 
