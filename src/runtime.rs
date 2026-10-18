@@ -149,6 +149,14 @@ impl Api {
             .send()?;
         let status = response.status();
         let reply: Value = response.json()?;
+        let busy = status == reqwest::StatusCode::CONFLICT
+            && reply.pointer("/error/type").and_then(Value::as_str) == Some("model_busy");
+        let batch_busy = status == reqwest::StatusCode::BAD_REQUEST
+            && reply.pointer("/error/message").and_then(Value::as_str)
+                == Some("VRAM: not while batch slots are decoding");
+        if busy || batch_busy {
+            bail!("RETRYABLE: engine is busy; waiting for a resize opportunity");
+        }
         if !status.is_success() {
             bail!(
                 "HTTP {status}: {}",
@@ -157,6 +165,9 @@ impl Api {
                     .and_then(Value::as_str)
                     .unwrap_or("resize refused")
             );
+        }
+        if reply["status"] == "not loaded" {
+            bail!("RETRYABLE: model unloaded before resize");
         }
         if reply["status"] != "ok" || reply["expert_cache_mib"].as_u64().is_none() {
             bail!("resize response did not report a completed cache resize");
@@ -201,11 +212,12 @@ impl Drop for Server {
 pub fn worker(args: &Args) -> Result<i32> {
     let config: Value =
         serde_json::from_slice(&fs::read(args.config()).context("read model config")?)?;
-    if config["vram_elastic"] != true {
+    if !args.no_vram_management && config["vram_elastic"] != true {
         bail!("enable vram_elastic in {}", args.config().display());
     }
-    if config["vram_segment_mib"].as_u64().unwrap_or(512) != 512 {
-        bail!("512 MiB cache segments are required");
+    let segment = config["vram_segment_mib"].as_u64().unwrap_or(512);
+    if !args.no_vram_management && (segment < 64 || !args.step_mib.is_multiple_of(segment)) {
+        bail!("step_mib must be a multiple of the model's vram_segment_mib ({segment})");
     }
     let port = args
         .port
@@ -259,6 +271,21 @@ pub fn worker(args: &Args) -> Result<i32> {
         false,
     );
     log.write(&format!("Raw output: {}", log.path.display()), false);
+    log.write(
+        &format!(
+            "Wrapper settings: {}",
+            if args.no_config {
+                "built-in defaults and CLI overrides".to_owned()
+            } else {
+                args.settings_path.display().to_string()
+            }
+        ),
+        false,
+    );
+    log.write(&format!("VRAM policy: GPU {}; reserve {} MiB; grow below {} MiB used; {:?} {}s; step {} MiB; margin {} MiB; no-op retry {}s{}",
+        args.gpu.as_deref().unwrap_or("0"), args.min_free_mib, args.grow_below_mib, args.growth_mode,
+        args.grow_delay, args.step_mib,args.accounting_margin_mib,args.no_op_retry,
+        if args.no_vram_management { "; management disabled" } else { "" }),false);
     let api = Api::new(port, config["api_key"].as_str().unwrap_or(""))?;
     let mut command = Command::new(args.strata_dir.join(".venv/bin/python"));
     command
@@ -271,6 +298,9 @@ pub fn worker(args: &Args) -> Result<i32> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    if let Some(gpu) = &args.gpu {
+        command.args(["--gpu", gpu]);
+    }
     let mut server = Server(command.spawn().context("start Strata")?);
     for pipe in [
         server
@@ -326,7 +356,11 @@ pub fn worker(args: &Args) -> Result<i32> {
         let tx = tx.clone();
         let stop = stop.clone();
         let poll = args.poll;
-        let gpu = config["gpu"].as_u64().unwrap_or(0) as u32;
+        let gpu = args
+            .gpu
+            .as_deref()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         thread::spawn(move || {
             let mut collector = Collector::new(gpu);
             while !stop.load(Ordering::Relaxed) {
@@ -353,9 +387,16 @@ pub fn worker(args: &Args) -> Result<i32> {
         args.grow_delay,
         args.poll,
     );
+    policy.growth_mode = args.growth_mode;
+    policy.step = args.step_mib;
+    policy.margin = args.accounting_margin_mib;
+    policy.retry_delay = args.no_op_retry;
     let mut metrics: Option<(Metrics, Instant)> = None;
-    let mut disabled = None::<String>;
+    let mut disabled = args
+        .no_vram_management
+        .then(|| "VRAM management disabled in settings".to_owned());
     let mut last_state = String::new();
+    let mut gpu_error = None::<String>;
     let mut next_policy = Instant::now();
     let mut result = 0;
     let mut last_failure = Instant::now();
@@ -396,6 +437,7 @@ pub fn worker(args: &Args) -> Result<i32> {
                 }
             }
             Ok(Input::Hardware(hw)) => {
+                gpu_error = hw.gpu_error.clone();
                 if let Some((data, updated)) = &metrics {
                     if updated.elapsed().as_secs() < 3
                         && truth(&data.status, "/loaded")
@@ -447,7 +489,7 @@ pub fn worker(args: &Args) -> Result<i32> {
                                 if changed {
                                     ""
                                 } else {
-                                    " · no change; waiting for conditions to change"
+                                    " · no change in requested direction; retrying after cooldown"
                                 }
                             ),
                             false,
@@ -457,6 +499,17 @@ pub fn worker(args: &Args) -> Result<i32> {
                             data.status["vram"] = reply;
                             data.status["vram"]["elastic"] = json!(true);
                         }
+                    }
+                    Err(error) if error.starts_with("RETRYABLE:") => {
+                        policy.complete(now, None);
+                        log.write(
+                            &format!(
+                                "VRAM resize deferred: {}; retry after {}s",
+                                error.trim_start_matches("RETRYABLE: "),
+                                args.no_op_retry
+                            ),
+                            false,
+                        );
                     }
                     Err(error) => {
                         policy.complete(now, None);
@@ -488,17 +541,10 @@ pub fn worker(args: &Args) -> Result<i32> {
                 .is_some_and(|(m, _)| !truth(&m.status, "/vram/elastic"))
             {
                 "Unavailable · engine is not elastic".into()
-            } else if metrics.as_ref().is_some_and(|(m, _)| m.busy()) {
-                "Holding · inference active".into()
-            } else if metrics
-                .as_ref()
-                .is_some_and(|(m, _)| m.cache() >= m.full_cache())
-            {
-                "Holding · full expert cache".into()
-            } else if let Some(left) = policy.quiet_left(now) {
-                format!("Growing in {:.0}s of spare capacity", left.ceil())
+            } else if let Some(error) = &gpu_error {
+                format!("Unavailable · GPU telemetry: {error}")
             } else {
-                "Holding · watching free memory".into()
+                policy.status(now)
             };
             if state != last_state || policy.quiet_left(now).is_some() {
                 emit(Event::Policy {
@@ -554,6 +600,65 @@ pub fn read_config(args: &Args) -> Result<Value> {
     Ok(serde_json::from_slice(
         &fs::read(args.config()).with_context(|| format!("read {}", args.config().display()))?,
     )?)
+}
+
+pub fn diagnose(args: &Args) -> Result<i32> {
+    let config = read_config(args)?;
+    let port = args
+        .port
+        .unwrap_or_else(|| config["port"].as_u64().unwrap_or(8080) as u16);
+    let api = Api::new(port, config["api_key"].as_str().unwrap_or(""))?;
+    let m = Metrics {
+        status: api.get("/v1/status")?,
+        data: api.get("/metrics")?,
+    };
+    let index = args.gpu.as_deref().unwrap_or("0").parse::<u32>()?;
+    let gpu = crate::hardware::gpus()?
+        .into_iter()
+        .find(|g| g.index == index)
+        .context("GPU not found")?;
+    let mut reasons = Vec::<String>::new();
+    if args.no_vram_management {
+        reasons.push("management disabled".into());
+    }
+    if !truth(&m.status, "/loaded") {
+        reasons.push("model unloaded".into());
+    }
+    if !truth(&m.status, "/vram/elastic") {
+        reasons.push("engine not elastic".into());
+    }
+    if m.cache() >= m.full_cache() {
+        reasons.push("full expert cache".into());
+    }
+    if m.busy() && args.growth_mode == crate::policy::GrowthMode::Idle {
+        reasons.push(
+            "idle mode requires a full quiet period without active or queued inference".into(),
+        );
+    }
+    if gpu.used_mib >= args.grow_below_mib {
+        reasons.push("GPU usage is at or above the growth threshold".into());
+    }
+    if gpu.free_mib
+        < args
+            .min_free_mib
+            .saturating_add(args.step_mib)
+            .saturating_add(args.accounting_margin_mib)
+    {
+        reasons.push("not enough free memory to preserve the reserve after one growth step".into());
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "read_only":true,"gpu":{"index":index,"name":gpu.name,"uuid":gpu.uuid,
+                "total_mib":gpu.total_mib,"used_mib":gpu.used_mib,"free_mib":gpu.free_mib,"driver_reserved_mib":gpu.reserved_mib},
+            "policy":{"growth_mode":args.growth_mode,"min_free_mib":args.min_free_mib,"grow_below_mib":args.grow_below_mib,
+                "grow_delay_seconds":args.grow_delay,"step_mib":args.step_mib,"accounting_margin_mib":args.accounting_margin_mib},
+            "engine":{"busy":m.busy(),"cache_mib":m.cache(),"full_cache_mib":m.full_cache(),"activity":m.activity()},
+            "growth_blockers":reasons,
+            "timing_note":"This snapshot cannot read the running worker's timer. Capacity mode waits for sustained spare VRAM; idle mode also waits for inference to stop. Strata applies queued resizes between requests."
+        }))?
+    );
+    Ok(0)
 }
 pub fn executable() -> Result<PathBuf> {
     std::env::current_exe().context("locate wrapper executable")
@@ -619,7 +724,30 @@ pub fn launch_command(args: &Args) -> Result<Command> {
             &args.grow_delay.to_string(),
             "--poll",
             &args.poll.to_string(),
+            "--growth-mode",
+            match args.growth_mode {
+                crate::policy::GrowthMode::Idle => "idle",
+                crate::policy::GrowthMode::Capacity => "capacity",
+            },
+            "--step-mib",
+            &args.step_mib.to_string(),
+            "--accounting-margin-mib",
+            &args.accounting_margin_mib.to_string(),
+            "--no-op-retry",
+            &args.no_op_retry.to_string(),
         ]);
+    if args.no_vram_management {
+        cmd.arg("--no-vram-management");
+    }
+    if args.no_config {
+        cmd.arg("--no-config");
+    }
+    if !args.settings_path.as_os_str().is_empty() {
+        cmd.arg("--config").arg(&args.settings_path);
+    }
+    if let Some(gpu) = &args.gpu {
+        cmd.args(["--gpu", gpu]);
+    }
     if let Some(port) = args.port {
         cmd.args(["--port", &port.to_string()]);
     }
@@ -631,4 +759,124 @@ pub fn launch_command(args: &Args) -> Result<Command> {
         .stderr(Stdio::piped())
         .process_group(0);
     Ok(cmd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resize_reply(status: u16, reply: Value) -> Result<Value> {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let task = thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            assert_eq!(request.url(), "/v1/vram");
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&body).unwrap()["reserve_mib"],
+                2000
+            );
+            request
+                .respond(
+                    tiny_http::Response::from_string(reply.to_string()).with_status_code(status),
+                )
+                .unwrap();
+        });
+        let result = Api::new(port, "").unwrap().resize(&Resize {
+            grow: true,
+            reserve: 2000,
+            before: 4096,
+        });
+        task.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn known_busy_responses_defer_but_uncertain_failures_pause() {
+        for (status, reply) in [
+            (409, json!({"error":{"type":"model_busy"}})),
+            (
+                400,
+                json!({"error":{"message":"VRAM: not while batch slots are decoding"}}),
+            ),
+            (200, json!({"status":"not loaded"})),
+        ] {
+            assert!(
+                resize_reply(status, reply)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("RETRYABLE:")
+            );
+        }
+        for (status, reply) in [
+            (400, json!({"error":{"message":"not elastic"}})),
+            (503, json!({"error":{"message":"engine did not answer"}})),
+            (200, json!({"status":"ok"})),
+            (200, json!({"status":"deferred", "expert_cache_mib":4608})),
+        ] {
+            assert!(
+                !resize_reply(status, reply)
+                    .unwrap_err()
+                    .to_string()
+                    .starts_with("RETRYABLE:")
+            );
+        }
+        assert_eq!(
+            resize_reply(200, json!({"status":"ok", "expert_cache_mib":4608})).unwrap()["expert_cache_mib"],
+            4608
+        );
+    }
+    #[test]
+    fn worker_receives_resolved_settings_without_reloading_the_file() {
+        use clap::{CommandFactory, FromArgMatches, Parser};
+        let mut original = Args::parse_from([
+            "strata-wrap",
+            "iq3_s",
+            "--growth-mode",
+            "capacity",
+            "--step-mib",
+            "256",
+            "--accounting-margin-mib",
+            "32",
+            "--no-op-retry",
+            "90",
+            "--gpu",
+            "2",
+            "--min-free-mib",
+            "2048",
+            "--grow-below-mib",
+            "29000",
+            "--grow-delay",
+            "70",
+            "--poll",
+            "3",
+            "--no-vram-management",
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        original.settings_path = dir.path().join("config.json");
+        fs::write(&original.settings_path, "invalid").unwrap();
+        let command = launch_command(&original).unwrap();
+        let argv: Vec<_> = command.get_args().map(|s| s.to_os_string()).collect();
+        let start = argv.iter().position(|s| s == "iq3_s").unwrap();
+        let matches = Args::command()
+            .try_get_matches_from(
+                std::iter::once(std::ffi::OsString::from("strata-wrap"))
+                    .chain(argv[start..].iter().cloned()),
+            )
+            .unwrap();
+        let mut worker = Args::from_arg_matches(&matches).unwrap();
+        crate::config::apply(&mut worker, &matches).unwrap();
+        worker.validate().unwrap();
+        assert!(worker.worker && worker.no_vram_management);
+        assert_eq!(worker.growth_mode, original.growth_mode);
+        assert_eq!(worker.step_mib, 256);
+        assert_eq!(worker.accounting_margin_mib, 32);
+        assert_eq!(worker.no_op_retry, 90.);
+        assert_eq!(worker.gpu.as_deref(), Some("2"));
+        assert_eq!(worker.min_free_mib, 2048);
+        assert_eq!(worker.grow_below_mib, 29000);
+        assert_eq!(worker.grow_delay, 70.);
+        assert_eq!(worker.poll, 3.);
+    }
 }

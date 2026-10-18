@@ -1,6 +1,6 @@
 [package]
 name = "strata-wrap"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Strata inference console and elastic VRAM supervisor"
@@ -10,7 +10,7 @@ homepage = "https://github.com/lindestad/strata-wrap"
 readme = "README.md"
 keywords = ["strata", "llm", "tui", "vram", "inference"]
 categories = ["command-line-utilities"]
-include = ["src/**", "tests/**", "docs/*.png", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
+include = ["src/**", "tests/**", "docs/*.png", "README.md", "AI_SETUP.md", "CONTRIBUTING.md", "CHANGELOG.md", "examples/*.json", "LICENSE", "Cargo.toml", "Cargo.lock"]
 
 [dependencies]
 anyhow = "1"

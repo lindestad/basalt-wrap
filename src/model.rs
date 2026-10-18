@@ -147,6 +147,7 @@ pub enum View {
 }
 
 pub struct App {
+    pub step_mib: u64,
     pub theme: crate::theme::Theme,
     pub theme_picker: Option<crate::theme::Theme>,
     pub theme_path: Option<std::path::PathBuf>,
@@ -183,6 +184,7 @@ pub struct App {
 impl App {
     pub fn new(model: String, port: u16) -> Self {
         Self {
+            step_mib: 512,
             theme: crate::theme::Theme::default(),
             theme_picker: None,
             theme_path: None,

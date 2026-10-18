@@ -51,7 +51,7 @@ impl Fixture {
             .arg("iq3_s")
             .arg("--strata-dir")
             .arg(root)
-            .args(["--unit", &unit, "--plain"])
+            .args(["--unit", &unit, "--plain", "--no-config"])
             .env("STRATA_WRAP_FIXTURE_ROOT", root)
             .env("XDG_STATE_HOME", root.join("state"))
             .stdin(Stdio::null())
@@ -163,7 +163,7 @@ fn lifecycle_cleanup_and_console() {
         let duplicate = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
             .args(["iq3_s", "--strata-dir"])
             .arg(f.temp.path())
-            .args(["--unit", &f.unit, "--plain"])
+            .args(["--unit", &f.unit, "--plain", "--no-config"])
             .output()
             .unwrap();
         assert!(!duplicate.status.success());

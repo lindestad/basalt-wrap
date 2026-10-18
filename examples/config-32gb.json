@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "gpu": 0,
+  "vram": {
+    "min_free_mib": 2048,
+    "grow_below_mib": null,
+    "growth_mode": "capacity",
+    "grow_delay_seconds": 60,
+    "poll_seconds": 2,
+    "step_mib": 512,
+    "accounting_margin_mib": 16,
+    "no_op_retry_seconds": 60
+  }
+}

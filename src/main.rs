@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod hardware;
 mod install;
 mod model;
@@ -8,7 +9,7 @@ mod theme;
 mod ui;
 
 use anyhow::{Result, bail};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
@@ -17,6 +18,43 @@ use std::path::PathBuf;
     about = "A Strata inference dashboard and elastic VRAM supervisor"
 )]
 pub struct Args {
+    /// Per-user wrapper settings (distinct from the positional Strata model JSON)
+    #[arg(long = "config")]
+    pub wrapper_config: Option<PathBuf>,
+    /// Use built-in settings without reading the user config
+    #[arg(long)]
+    pub no_config: bool,
+    /// Create a starter config without overwriting an existing file
+    #[arg(long)]
+    pub init_config: bool,
+    /// Validate user settings without starting Strata
+    #[arg(long)]
+    pub check_config: bool,
+    /// List NVIDIA GPU indices, UUIDs, and memory sizes
+    #[arg(long)]
+    pub list_gpus: bool,
+    /// Read the running server and GPU to explain growth eligibility; never resize or start a server
+    #[arg(long)]
+    pub diagnose: bool,
+    /// NVIDIA GPU index or UUID; applied to both the engine and monitoring
+    #[arg(long)]
+    pub gpu: Option<String>,
+    #[arg(long, value_enum, default_value = "idle")]
+    pub growth_mode: policy::GrowthMode,
+    #[arg(long, default_value_t = 512)]
+    pub step_mib: u64,
+    #[arg(long, default_value_t = 16)]
+    pub accounting_margin_mib: u64,
+    #[arg(long, default_value_t = 60.)]
+    pub no_op_retry: f64,
+    #[arg(long)]
+    pub no_vram_management: bool,
+    #[arg(skip)]
+    pub settings_path: PathBuf,
+    #[arg(skip)]
+    pub auto_min_free: bool,
+    #[arg(skip)]
+    pub auto_grow_below: bool,
     /// iq3_s, ud-iq3_s, a model JSON path, or 'install'
     pub model: Option<String>,
     #[arg(long, default_value_os_t = home().join("apps/Strata"))]
@@ -83,14 +121,28 @@ impl Args {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(gpu) = &self.gpu {
+            anyhow::ensure!(
+                gpu.parse::<u32>().is_ok()
+                    || (gpu.starts_with("GPU-") && !gpu.chars().any(char::is_whitespace)),
+                "GPU must be an NVIDIA index or GPU UUID"
+            );
+        }
         if !self.poll.is_finite()
-            || self.poll < 0.2
+            || !(0.2..=60.).contains(&self.poll)
             || !self.grow_delay.is_finite()
-            || self.grow_delay < 0.0
+            || !(0.0..=86400.).contains(&self.grow_delay)
             || self.grow_below_mib == 0
+            || self.min_free_mib == 0
+            || self.step_mib < 64
+            || self.step_mib > 65536
+            || self.accounting_margin_mib > 4096
+            || !self.no_op_retry.is_finite()
+            || !(1.0..=86400.).contains(&self.no_op_retry)
         {
             bail!("invalid VRAM thresholds or polling interval");
         }
+        anyhow::ensure!(self.port != Some(0), "port must be between 1 and 65535");
         if self.unit.is_empty()
             || !self
                 .unit
@@ -100,8 +152,16 @@ impl Args {
             bail!("invalid systemd unit name");
         }
         if self.server_args.iter().any(|v| {
-            ["--host", "--port", "--config", "--engine", "--api-key"]
-                .contains(&v.split('=').next().unwrap_or(""))
+            [
+                "--host",
+                "--port",
+                "--config",
+                "--engine",
+                "--api-key",
+                "--gpu",
+                "--gpus",
+            ]
+            .contains(&v.split('=').next().unwrap_or(""))
         }) {
             bail!(
                 "the wrapper owns host, port and engine; set the model and API key in its JSON config"
@@ -112,8 +172,28 @@ impl Args {
 }
 
 fn run() -> Result<i32> {
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let mut args = Args::from_arg_matches(&matches)?;
+    config::apply(&mut args, &matches)?;
     args.validate()?;
+    if args.init_config {
+        config::initialize(&args.settings_path)?;
+        return Ok(0);
+    }
+    if args.check_config {
+        config::load(&args.settings_path, true)?;
+        println!("Valid wrapper config: {}", args.settings_path.display());
+        return Ok(0);
+    }
+    if args.list_gpus {
+        for gpu in hardware::gpus()? {
+            println!(
+                "{}  {}  {}  {} MiB",
+                gpu.index, gpu.uuid, gpu.name, gpu.total_mib
+            );
+        }
+        return Ok(0);
+    }
     if args.list_themes {
         for theme in theme::Theme::ALL {
             println!("{:<18} {}", theme.name(), theme.description());
@@ -133,7 +213,13 @@ fn run() -> Result<i32> {
     if args.worker {
         runtime::worker(&args)
     } else {
-        app::launch(&args)
+        let model = runtime::read_config(&args)?;
+        config::resolve_model(&mut args, &model)?;
+        if args.diagnose {
+            runtime::diagnose(&args)
+        } else {
+            app::launch(&args)
+        }
     }
 }
 

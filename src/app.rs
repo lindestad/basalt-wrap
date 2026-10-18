@@ -54,6 +54,7 @@ pub fn launch(args: &Args) -> Result<i32> {
     );
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
+    app.step_mib = args.step_mib;
     configure_theme(&mut app, args);
     let signal = runtime::signals()?;
     let mut runner = Runner {
@@ -443,6 +444,9 @@ pub fn key_action(app: &mut App, key: KeyCode) {
 
 pub fn demo(args: &Args) -> Result<i32> {
     let mut app = model::demo();
+    app.step_mib = args.step_mib;
+    app.min_free_mib = args.min_free_mib;
+    app.grow_below_mib = args.grow_below_mib;
     configure_theme(&mut app, args);
     if let Some(size) = &args.snapshot {
         let (w, h) = size
@@ -480,7 +484,7 @@ fn configure_theme(app: &mut App, args: &Args) {
     let path = theme::preferences_path();
     app.theme = if let Some(theme) = args.theme {
         theme
-    } else if args.snapshot.is_some() {
+    } else if args.snapshot.is_some() || args.no_config {
         theme::Theme::default()
     } else {
         theme::load(&path).unwrap_or_else(|error| {
@@ -489,7 +493,11 @@ fn configure_theme(app: &mut App, args: &Args) {
         })
     };
     if !app.demo {
-        app.theme_path = Some(path);
+        app.theme_path = Some(if args.settings_path.as_os_str().is_empty() {
+            crate::config::default_path()
+        } else {
+            args.settings_path.clone()
+        });
     }
 }
 

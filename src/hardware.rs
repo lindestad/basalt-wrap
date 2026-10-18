@@ -11,6 +11,35 @@ use std::{
     time::Instant,
 };
 
+pub struct GpuInfo {
+    pub index: u32,
+    pub uuid: String,
+    pub name: String,
+    pub total_mib: u64,
+    pub free_mib: u64,
+    pub used_mib: u64,
+    pub reserved_mib: u64,
+}
+
+pub fn gpus() -> anyhow::Result<Vec<GpuInfo>> {
+    let nvml = Nvml::init()?;
+    (0..nvml.device_count()?)
+        .map(|index| {
+            let d = nvml.device_by_index(index)?;
+            let memory = d.memory_info()?;
+            Ok(GpuInfo {
+                index,
+                uuid: d.uuid()?,
+                name: d.name()?,
+                total_mib: memory.total >> 20,
+                free_mib: memory.free >> 20,
+                used_mib: memory.total.saturating_sub(memory.free) >> 20,
+                reserved_mib: memory.reserved >> 20,
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GpuProcess {
     pub pid: u32,

@@ -106,12 +106,13 @@ opens no listener, and makes no systemd, VRAM, or preference changes. Press `t`
 to try palettes and `q` to close it. The running model continues independently.
 You can also launch `./strata-wrap --preview` from a separately built worktree.
 
-Normal sessions save confirmed selections to
-`$XDG_CONFIG_HOME/strata-wrap/preferences.json`, or
-`~/.config/strata-wrap/preferences.json` when that variable is unset.
+Normal sessions save confirmed selections in the selected wrapper config, which
+defaults to `~/.config/strata-wrap/config.json` (under `$XDG_CONFIG_HOME` when set).
 `--theme` takes precedence without saving; selecting a theme in the picker saves
-it. A running session keeps its own palette when another session changes the
-saved choice. Snapshots default to `strata`; pass `--theme` to render another
+it to the wrapper config. Existing `preferences.json` themes remain a fallback
+until a theme is saved in the new config. A running session keeps its own palette
+when another session changes the saved choice. Snapshots use the configured
+theme, or `strata` when none is configured. Pass `--theme` to render another
 palette.
 
 The inspired palettes adapt [Nord](https://www.nordtheme.com/docs/colors-and-palettes/),
@@ -123,20 +124,81 @@ The inspired palettes adapt [Nord](https://www.nordtheme.com/docs/colors-and-pal
 [Rosé Pine](https://github.com/rose-pine/neovim), and
 [Everforest](https://github.com/sainnhe/everforest) for this dashboard.
 
-## VRAM policy
+## User configuration
 
-Every two seconds, the supervisor checks total GPU memory use. Below 1,024 MiB free, it requests another 512 MiB cache reduction. A confirmed reduction allows another shrink after the cooldown. A no-op suppresses that direction until available memory, cache size, or inference activity changes meaningfully.
-
-Growth requires GPU usage below 14,336 MiB and no inference for 60 continuous seconds. Each growth step needs a fresh quiet period. New inference, a resize, missing telemetry, or crossing the usage threshold resets that timer. Growth preserves at least 1,024 MiB free and stops at the engine's initial full cache size.
-
-Strata's endpoint takes a free-memory target rather than a cache delta. Targets include a 16 MiB accounting margin in both directions because NVML and CUDA can disagree slightly. Concurrent allocations and segment rounding can change the actual result. Only one resize may be outstanding; responses must confirm a cache-size change. A failed or uncertain resize pauses management until restart. The server keeps serving inference.
-
-A shrink may wait behind an inference request, and only the expert cache can shrink. The reserve is best effort; this cannot guarantee room for a sudden allocation burst.
+Create and validate a per-user config:
 
 ```sh
-strata-wrap iq3_s --min-free-mib 1024 --grow-below-mib 14336 \
-    --grow-delay 60 --poll 2
+strata-wrap --init-config
+strata-wrap --check-config
+strata-wrap --list-gpus
 ```
+
+Settings live at `$XDG_CONFIG_HOME/strata-wrap/config.json`, or
+`~/.config/strata-wrap/config.json`. Use `--config /path/to/config.json` for
+another profile and `--no-config` to use built-in defaults. CLI options override
+saved settings. Model JSON files remain separate: the positional model selects
+Strata's own config, while `--config` selects the wrapper's settings.
+
+```json
+{
+  "schema_version": 1,
+  "gpu": 0,
+  "vram": {
+    "growth_mode": "capacity",
+    "min_free_mib": 1024,
+    "grow_below_mib": 14336,
+    "grow_delay_seconds": 60,
+    "poll_seconds": 2,
+    "step_mib": 512,
+    "accounting_margin_mib": 16,
+    "no_op_retry_seconds": 60
+  }
+}
+```
+
+This example targets a 16 GiB card. Leave the thresholds `null` or omit them to
+size them from the selected GPU's measured memory. Defaults reserve at least
+1 GiB, or 1/16 of VRAM on larger cards, and leave another 1 GiB of hysteresis
+before allowing growth. A 12 GiB card and a 32 GiB card therefore get different
+thresholds. See [AI_SETUP.md](AI_SETUP.md) for recommendations and the full schema.
+
+The `gpu` setting accepts an NVIDIA index or UUID. The wrapper passes the same
+selection to Strata and NVML, so monitoring and resize decisions follow the
+engine's card. Elastic management supports one NVIDIA GPU per model; layer
+splits and peer-GPU expert caches are unsupported.
+
+## VRAM policy
+
+The supervisor requests a cache reduction when free VRAM drops below the
+reserve. Growth requires usage below the growth threshold for the configured
+delay, enough room for a step while preserving the reserve, and room below the
+engine's full cache size. The threshold is a trigger, so one step may take usage
+above it. Driver-reserved memory counts as used.
+
+`idle` mode, the default, requires a continuous period without active or queued
+inference. `capacity` mode counts sustained spare VRAM while inference continues
+and queues a resize for Strata to apply between requests. Each completed resize
+starts a fresh growth period. Crossing the threshold, changed cache capacity,
+or interrupted telemetry resets it. This prevents consecutive grows from using
+one allowance. A busy session can keep `idle` mode from growing indefinitely.
+
+Strata accepts a free-memory target, so step size is approximate: segment
+rounding and allocations made while a resize waits can change the result.
+Only one resize is outstanding. No-op and engine-busy responses get a cooldown
+before retrying. Other failed or uncertain resizes pause management and report
+why; inference continues. Set `vram.enabled` to `false` to monitor without
+requesting resizes. A reserve cannot guarantee space for a sudden allocation.
+
+To inspect a running server without starting or resizing it:
+
+```sh
+strata-wrap iq3_s --diagnose
+```
+
+The report includes measured GPU memory, selected policy, live cache size,
+inference activity, and growth blockers. It does not include prompts, responses,
+or the API key. The TUI shows the running worker's countdown and pending state.
 
 ## Shutdown
 
@@ -148,32 +210,11 @@ systemctl --user stop strata-wrap
 
 Shutdown sends SIGTERM to Strata for its normal cleanup. An unresponsive server is killed after 12 seconds. systemd's `KillMode=mixed` and 20-second stop timeout contain and clean up all descendants, including children that create separate process groups or sessions. Killing the service's main wrapper also cleans up the engine. The worker watches the foreground launcher's pidfd, so killing that launcher triggers shutdown too. Terminal state is restored on normal exit, errors, handled signals, and panics.
 
-## Development
+## Setup and development
 
-```sh
-cargo build --release --locked
-./strata-wrap --preview
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
-cargo fmt --check
-cargo build --release --locked
-```
-
-Tests cover weighted session throughput, navigation, scrolling, resize timing, no-op handling, all palettes and overlays at small terminal sizes, grayscale output, theme selection and persistence, preview isolation, and the process-panel height limit. Integration tests use the real systemd user manager and a Rust HTTP fixture whose child escapes into a new session and ignores SIGTERM. They exercise interrupt, hangup, termination, launcher and worker SIGKILL, service stop, server crashes, duplicate launches, and installation. The ignored `fixture_process` test is the child fixture entry point, not a skipped check. Integration tests use port 18089 and remove their transient services afterward.
-
-## Releases
-
-CI checks formatting, Clippy, tests, crate packaging, and Rust 1.88 compatibility.
-The Linux runner starts a systemd user manager for the lifecycle tests; it does
-not need an NVIDIA GPU.
-
-Version tags such as `v0.2.0` verify the matching Cargo version, publish to
-crates.io through GitHub OIDC Trusted Publishing, and attach a Linux x86_64
-binary to a GitHub release. The crates.io publisher is restricted to
-`lindestad/strata-wrap`, `.github/workflows/release.yml`, and the `crates-io`
-environment. The first crate version is published manually before configuring
-Trusted Publishing. A release skips crate upload when that version is already
-published, so the bootstrap release can still build its binary.
+See [AI_SETUP.md](AI_SETUP.md) for agent-assisted setup and card-specific settings.
+Build, test, and release instructions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+Version notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

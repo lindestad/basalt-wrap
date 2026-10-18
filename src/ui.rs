@@ -459,7 +459,7 @@ impl Ui {
                 hw.gpu_name.replace("NVIDIA GeForce ", "")
             },
         );
-        let danger = hw.gpu_free < 1024 * 1048576 && hw.gpu_total > 0;
+        let danger = hw.gpu_free < app.min_free_mib.saturating_mul(1048576) && hw.gpu_total > 0;
         self.gauge(
             f,
             left,
@@ -750,8 +750,9 @@ impl Ui {
             inner,
             3,
             Line::from(self.dim(format!(
-                "{} expert slots · 512 MiB steps",
-                commas(number(data, "/engine/expert_slots") as u64)
+                "{} expert slots · {} MiB steps",
+                commas(number(data, "/engine/expert_slots") as u64),
+                app.step_mib
             ))),
         );
         line(

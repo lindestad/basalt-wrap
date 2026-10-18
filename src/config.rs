@@ -1,0 +1,383 @@
+use crate::{Args, hardware, policy::GrowthMode, theme::Theme};
+use anyhow::{Context, Result, bail, ensure};
+use clap::{ArgMatches, parser::ValueSource};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Gpu {
+    Index(u32),
+    Uuid(String),
+}
+impl std::fmt::Display for Gpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Index(i) => write!(f, "{i}"),
+            Self::Uuid(s) => f.write_str(s),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+    pub schema_version: u32,
+    pub strata_dir: Option<PathBuf>,
+    pub model: Option<String>,
+    pub port: Option<u16>,
+    pub unit: String,
+    pub gpu: Option<Gpu>,
+    pub theme: Option<Theme>,
+    pub vram: Vram,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            strata_dir: None,
+            model: None,
+            port: None,
+            unit: "strata-wrap".into(),
+            gpu: None,
+            theme: None,
+            vram: Vram::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Vram {
+    pub enabled: bool,
+    pub min_free_mib: Option<u64>,
+    pub grow_below_mib: Option<u64>,
+    pub grow_delay_seconds: f64,
+    pub poll_seconds: f64,
+    pub growth_mode: GrowthMode,
+    pub step_mib: u64,
+    pub accounting_margin_mib: u64,
+    pub no_op_retry_seconds: f64,
+}
+impl Default for Vram {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_free_mib: None,
+            grow_below_mib: None,
+            grow_delay_seconds: 60.,
+            poll_seconds: 2.,
+            growth_mode: GrowthMode::Idle,
+            step_mib: 512,
+            accounting_margin_mib: 16,
+            no_op_retry_seconds: 60.,
+        }
+    }
+}
+
+pub fn default_path() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|p| Path::new(p).is_absolute())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::home().join(".config"))
+        .join("strata-wrap/config.json")
+}
+
+pub fn load(path: &Path, required: bool) -> Result<Settings> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let settings: Settings = serde_json::from_slice(&bytes)
+                .with_context(|| format!("parse wrapper config {}", path.display()))?;
+            ensure!(
+                settings.model.as_deref() != Some("install"),
+                "the default model cannot be the install command"
+            );
+            ensure!(
+                settings.schema_version == 1,
+                "unsupported wrapper config schema_version {}",
+                settings.schema_version
+            );
+            ensure!(
+                settings.vram.min_free_mib != Some(0) && settings.vram.grow_below_mib != Some(0),
+                "VRAM thresholds must be positive or null for automatic sizing"
+            );
+            let v = &settings.vram;
+            ensure!(
+                v.grow_delay_seconds.is_finite()
+                    && (0.0..=86400.).contains(&v.grow_delay_seconds)
+                    && v.poll_seconds.is_finite()
+                    && (0.2..=60.).contains(&v.poll_seconds)
+                    && (64..=65536).contains(&v.step_mib)
+                    && v.accounting_margin_mib <= 4096
+                    && v.no_op_retry_seconds.is_finite()
+                    && (1.0..=86400.).contains(&v.no_op_retry_seconds),
+                "invalid VRAM thresholds or polling interval in wrapper config"
+            );
+            ensure!(settings.port != Some(0), "port must be between 1 and 65535");
+            ensure!(
+                !settings.unit.is_empty()
+                    && settings
+                        .unit
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+                "invalid systemd unit name in wrapper config"
+            );
+            if let Some(gpu) = &settings.gpu {
+                let selector = gpu.to_string();
+                ensure!(
+                    selector.parse::<u32>().is_ok()
+                        || (selector.starts_with("GPU-")
+                            && !selector.chars().any(char::is_whitespace)),
+                    "GPU must be an NVIDIA index or GPU UUID"
+                );
+            }
+            Ok(settings)
+        }
+        Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+        Err(e) => Err(e).with_context(|| format!("read wrapper config {}", path.display())),
+    }
+}
+
+pub fn initialize(path: &Path) -> Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(path.parent().context("config needs a directory")?)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "create {} (existing files are never overwritten)",
+                path.display()
+            )
+        })?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string_pretty(&Settings::default())?
+    )?;
+    println!("Created {}", path.display());
+    Ok(())
+}
+
+fn configured_path(path: &Path, parent: &Path) -> PathBuf {
+    if let Ok(rest) = path.strip_prefix("~") {
+        crate::home().join(rest)
+    } else if path.is_absolute() {
+        path.to_owned()
+    } else {
+        parent.join(path)
+    }
+}
+
+pub fn apply(args: &mut Args, matches: &ArgMatches) -> Result<()> {
+    let path = args.wrapper_config.clone().unwrap_or_else(default_path);
+    args.settings_path = path.clone();
+    args.auto_min_free = matches.value_source("min_free_mib") != Some(ValueSource::CommandLine);
+    args.auto_grow_below = matches.value_source("grow_below_mib") != Some(ValueSource::CommandLine);
+    if args.worker || args.no_config || args.init_config {
+        return Ok(());
+    }
+    let settings = load(&path, args.wrapper_config.is_some())?;
+    let from_cli = |name: &str| matches.value_source(name) == Some(ValueSource::CommandLine);
+    let parent = path.parent().unwrap_or(Path::new("."));
+    if !from_cli("strata_dir")
+        && let Some(p) = &settings.strata_dir
+    {
+        args.strata_dir = configured_path(p, parent);
+    }
+    if args.model.is_none()
+        && let Some(model) = &settings.model
+    {
+        args.model = Some(if matches!(model.as_str(), "iq3_s" | "ud-iq3_s") {
+            model.clone()
+        } else {
+            configured_path(Path::new(model), parent)
+                .to_string_lossy()
+                .into_owned()
+        });
+    }
+    if args.port.is_none() {
+        args.port = settings.port;
+    }
+    if !from_cli("unit") {
+        args.unit = settings.unit;
+    }
+    if args.gpu.is_none() {
+        args.gpu = settings.gpu.map(|g| g.to_string());
+    }
+    if args.theme.is_none() {
+        args.theme = settings.theme;
+    }
+    args.auto_min_free = !from_cli("min_free_mib") && settings.vram.min_free_mib.is_none();
+    args.auto_grow_below = !from_cli("grow_below_mib") && settings.vram.grow_below_mib.is_none();
+    if !from_cli("min_free_mib")
+        && let Some(v) = settings.vram.min_free_mib
+    {
+        args.min_free_mib = v;
+    }
+    if !from_cli("grow_below_mib")
+        && let Some(v) = settings.vram.grow_below_mib
+    {
+        args.grow_below_mib = v;
+    }
+    if !from_cli("grow_delay") {
+        args.grow_delay = settings.vram.grow_delay_seconds;
+    }
+    if !from_cli("poll") {
+        args.poll = settings.vram.poll_seconds;
+    }
+    if !from_cli("growth_mode") {
+        args.growth_mode = settings.vram.growth_mode;
+    }
+    if !from_cli("step_mib") {
+        args.step_mib = settings.vram.step_mib;
+    }
+    if !from_cli("accounting_margin_mib") {
+        args.accounting_margin_mib = settings.vram.accounting_margin_mib;
+    }
+    if !from_cli("no_op_retry") {
+        args.no_op_retry = settings.vram.no_op_retry_seconds;
+    }
+    args.no_vram_management |= !settings.vram.enabled;
+    Ok(())
+}
+
+pub fn thresholds(
+    total_mib: u64,
+    min_free: Option<u64>,
+    grow_below: Option<u64>,
+) -> Result<(u64, u64)> {
+    let reserve = min_free.unwrap_or((total_mib / 16).max(1024));
+    let ceiling =
+        grow_below.unwrap_or_else(|| total_mib.saturating_sub(reserve.saturating_add(1024)));
+    ensure!(
+        reserve < total_mib && ceiling > 0 && ceiling < total_mib,
+        "VRAM thresholds must fit the selected GPU ({total_mib} MiB)"
+    );
+    ensure!(
+        ceiling <= total_mib - reserve,
+        "grow_below_mib must leave at least min_free_mib free"
+    );
+    Ok((reserve, ceiling))
+}
+
+pub fn resolve_model(args: &mut Args, model: &serde_json::Value) -> Result<()> {
+    ensure!(
+        model
+            .get("replicas")
+            .is_none_or(|v| v.is_null() || v.as_u64() == Some(1)),
+        "replica configurations are not supported by elastic VRAM management"
+    );
+    let selector = if let Some(gpu) = &args.gpu {
+        gpu.clone()
+    } else {
+        match model.get("gpu") {
+            None | Some(serde_json::Value::Null) => "0".to_owned(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) if !s.contains(',') => s.clone(),
+            Some(serde_json::Value::Array(a)) if a.len() == 1 => {
+                a[0].to_string().trim_matches('"').to_owned()
+            }
+            _ => bail!(
+                "elastic VRAM management supports one NVIDIA GPU; choose a single GPU in the model config"
+            ),
+        }
+    };
+    match hardware::gpus() {
+        Ok(devices) => {
+            let device = devices
+                .iter()
+                .find(|d| d.index.to_string() == selector || d.uuid == selector)
+                .with_context(|| format!("NVIDIA GPU {selector} not found; use --list-gpus"))?;
+            args.gpu = Some(device.index.to_string());
+            let (reserve, ceiling) = thresholds(
+                device.total_mib,
+                (!args.auto_min_free).then_some(args.min_free_mib),
+                (!args.auto_grow_below).then_some(args.grow_below_mib),
+            )?;
+            args.min_free_mib = reserve;
+            args.grow_below_mib = ceiling;
+        }
+        Err(_) if selector.parse::<u32>().is_ok() => args.gpu = Some(selector),
+        Err(e) => return Err(e).context("resolving GPU UUID requires NVML"),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, FromArgMatches};
+    #[test]
+    fn cli_overrides_saved_values_and_relative_paths_follow_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path,r#"{"model":"models/model.json","strata_dir":"engine","gpu":2,"theme":"ember","vram":{"min_free_mib":1024,"grow_below_mib":10000,"growth_mode":"capacity","step_mib":256}}"#).unwrap();
+        let matches = Args::command()
+            .try_get_matches_from([
+                "strata-wrap",
+                "--config",
+                path.to_str().unwrap(),
+                "--min-free-mib",
+                "1536",
+                "--growth-mode",
+                "idle",
+            ])
+            .unwrap();
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        apply(&mut args, &matches).unwrap();
+        args.validate().unwrap();
+        assert_eq!(args.min_free_mib, 1536);
+        assert_eq!(args.grow_below_mib, 10000);
+        assert_eq!(args.growth_mode, GrowthMode::Idle);
+        assert_eq!(args.step_mib, 256);
+        assert_eq!(args.gpu.as_deref(), Some("2"));
+        assert_eq!(args.theme, Some(Theme::Ember));
+        assert_eq!(args.strata_dir, dir.path().join("engine"));
+        assert_eq!(
+            args.model.as_deref(),
+            dir.path().join("models/model.json").to_str()
+        );
+        assert!(!args.auto_min_free && !args.auto_grow_below);
+    }
+    #[test]
+    fn no_config_bypasses_a_broken_file_and_preserves_auto_sizing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.json");
+        std::fs::write(&path, "broken").unwrap();
+        let matches = Args::command()
+            .try_get_matches_from([
+                "strata-wrap",
+                "--config",
+                path.to_str().unwrap(),
+                "--no-config",
+            ])
+            .unwrap();
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        apply(&mut args, &matches).unwrap();
+        assert!(args.auto_min_free && args.auto_grow_below);
+    }
+    #[test]
+    fn capacities_scale_and_explicit_policy_is_preserved() {
+        assert_eq!(thresholds(12288, None, None).unwrap(), (1024, 10240));
+        assert_eq!(thresholds(16384, None, None).unwrap(), (1024, 14336));
+        assert_eq!(thresholds(32768, None, None).unwrap(), (2048, 29696));
+        assert_eq!(
+            thresholds(16303, Some(1024), Some(14336)).unwrap(),
+            (1024, 14336)
+        );
+        assert!(thresholds(12288, Some(1024), Some(14336)).is_err());
+        assert!(thresholds(12288, Some(2048), Some(11000)).is_err());
+    }
+    #[test]
+    fn config_creation_refuses_overwrite_and_rejects_typos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        initialize(&path).unwrap();
+        assert!(initialize(&path).is_err());
+        assert_eq!(load(&path, true).unwrap().schema_version, 1);
+        std::fs::write(&path, r#"{"vram":{"grow_dealy_seconds":2}}"#).unwrap();
+        assert!(load(&path, true).is_err());
+    }
+}
