@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0 (unreleased)
+## 0.3.0 — 2026-10-18
 
 - Fetch all retained request history, default ages to whole minutes, and refresh
   them every 30 seconds or on new entries. Add `a` and `--age-seconds` for seconds.
@@ -15,7 +15,6 @@
   age-refresh, layout, and attachment tests.
 - Require release tags to pass the full quality checks. Include docs/examples
   and checksums with binary releases.
-
 - Add per-user JSON settings for GPU selection, VRAM thresholds, growth timing,
   step size, retry cooldown, and themes. CLI options override saved settings.
 - Size automatic thresholds from the selected NVIDIA card's measured VRAM.
