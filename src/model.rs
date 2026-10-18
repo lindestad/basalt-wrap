@@ -132,6 +132,10 @@ pub enum View {
 }
 
 pub struct App {
+    pub theme: crate::theme::Theme,
+    pub theme_picker: Option<crate::theme::Theme>,
+    pub theme_path: Option<std::path::PathBuf>,
+    pub theme_notice: Option<String>,
     pub model: String,
     pub address: String,
     pub metrics: Metrics,
@@ -164,6 +168,10 @@ pub struct App {
 impl App {
     pub fn new(model: String, port: u16) -> Self {
         Self {
+            theme: crate::theme::Theme::default(),
+            theme_picker: None,
+            theme_path: None,
+            theme_notice: None,
             model,
             address: format!("127.0.0.1:{port}"),
             metrics: Metrics::default(),

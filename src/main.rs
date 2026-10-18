@@ -4,6 +4,7 @@ mod install;
 mod model;
 mod policy;
 mod runtime;
+mod theme;
 mod ui;
 
 use anyhow::{Result, bail};
@@ -39,8 +40,14 @@ pub struct Args {
     #[arg(long)]
     pub raw: bool,
     /// Preview the dashboard with sample data, without starting Strata
-    #[arg(long)]
+    #[arg(long, visible_alias = "preview")]
     pub demo: bool,
+    /// Choose a palette for this launch (overrides the saved preference)
+    #[arg(long, value_enum)]
+    pub theme: Option<theme::Theme>,
+    /// List palettes without starting Strata
+    #[arg(long)]
+    pub list_themes: bool,
     /// Render sample data at WIDTHxHEIGHT to plain text (or JSON with --cells)
     #[arg(long)]
     pub snapshot: Option<String>,
@@ -107,6 +114,12 @@ impl Args {
 fn run() -> Result<i32> {
     let args = Args::parse();
     args.validate()?;
+    if args.list_themes {
+        for theme in theme::Theme::ALL {
+            println!("{:<18} {}", theme.name(), theme.description());
+        }
+        return Ok(0);
+    }
     if args.model.as_deref() == Some("install") {
         install::run()?;
         return Ok(0);

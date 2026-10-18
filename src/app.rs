@@ -1,7 +1,7 @@
 use crate::{
     Args,
     model::{self, App, Event, View, number, text},
-    runtime, ui,
+    runtime, theme, ui,
 };
 use anyhow::Result;
 use crossterm::event::{self, Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -54,6 +54,7 @@ pub fn launch(args: &Args) -> Result<i32> {
     );
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
+    configure_theme(&mut app, args);
     let signal = runtime::signals()?;
     let mut runner = Runner {
         child: runtime::launch_command(args)?.spawn()?,
@@ -207,6 +208,11 @@ fn plain(event: &Event, raw: bool, stamp: &mut f64) {
 }
 
 pub fn key_event(app: &mut App, key: KeyEvent) {
+    if app.theme_picker.is_some() {
+        app.pending_g = None;
+        key_action(app, key.code);
+        return;
+    }
     if !app.help && key.modifiers.contains(KeyModifiers::CONTROL) {
         let page = if app.process_focus {
             app.process_rows.max(1)
@@ -246,10 +252,50 @@ pub fn key_event(app: &mut App, key: KeyEvent) {
 }
 
 pub fn key_action(app: &mut App, key: KeyCode) {
+    if let Some(original) = app.theme_picker {
+        let index = theme::Theme::ALL
+            .iter()
+            .position(|t| *t == app.theme)
+            .unwrap_or(0);
+        match key {
+            KeyCode::Char('j' | 'l') | KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                app.theme = theme::Theme::ALL[(index + 1) % theme::Theme::ALL.len()];
+                app.theme_notice = None;
+            }
+            KeyCode::Char('k' | 'h') | KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
+                app.theme = theme::Theme::ALL
+                    [(index + theme::Theme::ALL.len() - 1) % theme::Theme::ALL.len()];
+                app.theme_notice = None;
+            }
+            KeyCode::Home | KeyCode::Char('g') => app.theme = theme::Theme::Strata,
+            KeyCode::End | KeyCode::Char('G') => app.theme = theme::Theme::SolarizedLight,
+            KeyCode::Esc | KeyCode::Char('t') => {
+                app.theme = original;
+                app.theme_picker = None;
+                app.theme_notice = None;
+            }
+            KeyCode::Enter => {
+                if let Some(path) = &app.theme_path
+                    && let Err(e) = theme::save(path, app.theme)
+                {
+                    app.theme_notice = Some(format!("Could not save: {e}. Esc cancels."));
+                    return;
+                }
+                app.theme_picker = None;
+                app.theme_notice = None;
+            }
+            _ => {}
+        }
+        return;
+    }
     if app.help {
         if matches!(key, KeyCode::Esc | KeyCode::Char('?')) {
             app.help = false;
         }
+        return;
+    }
+    if key == KeyCode::Char('t') {
+        app.theme_picker = Some(app.theme);
         return;
     }
     if key == KeyCode::Char('p') && app.process_rows > 0 {
@@ -397,6 +443,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
 
 pub fn demo(args: &Args) -> Result<i32> {
     let mut app = model::demo();
+    configure_theme(&mut app, args);
     if let Some(size) = &args.snapshot {
         let (w, h) = size
             .split_once('x')
@@ -429,6 +476,23 @@ pub fn demo(args: &Args) -> Result<i32> {
     Ok(0)
 }
 
+fn configure_theme(app: &mut App, args: &Args) {
+    let path = theme::preferences_path();
+    app.theme = if let Some(theme) = args.theme {
+        theme
+    } else if args.snapshot.is_some() {
+        theme::Theme::default()
+    } else {
+        theme::load(&path).unwrap_or_else(|error| {
+            app.theme_notice = Some(format!("Saved theme unavailable: {error}. Using Strata."));
+            theme::Theme::default()
+        })
+    };
+    if !app.demo {
+        app.theme_path = Some(path);
+    }
+}
+
 fn viewport(app: &mut App, height: u16) {
     app.page_rows = ui::visible_rows(app, height);
     app.process_rows = ui::process_height(height)
@@ -450,6 +514,71 @@ mod tests {
     use super::*;
     fn key(app: &mut App, code: KeyCode) {
         key_event(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+    #[test]
+    fn theme_preview_is_modal_and_escape_restores_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        let mut app = model::demo();
+        app.theme_path = Some(path.clone());
+        app.process_focus = true;
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.theme, theme::Theme::Ember);
+        key(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.theme, theme::Theme::Monochrome);
+        assert_eq!(app.view, View::Overview);
+        assert_eq!(app.scroll, 0);
+        assert_eq!(app.process_offset, 0);
+        assert!(!path.exists());
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.theme, theme::Theme::Strata);
+        assert!(app.theme_picker.is_none());
+        assert!(!path.exists());
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.theme, theme::Theme::SolarizedLight);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.theme_picker.is_none());
+        assert_eq!(theme::load(&path).unwrap(), theme::Theme::SolarizedLight);
+    }
+
+    #[test]
+    fn preview_never_saves_preferences_and_accepts_cli_palette() {
+        let args =
+            <Args as clap::Parser>::parse_from(["strata-wrap", "--preview", "--theme", "ember"]);
+        assert!(args.demo);
+        let mut app = model::demo();
+        configure_theme(&mut app, &args);
+        assert_eq!(app.theme, theme::Theme::Ember);
+        assert!(app.theme_path.is_none());
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('l'));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.theme, theme::Theme::Monochrome);
+        assert!(app.theme_picker.is_none());
+    }
+
+    #[test]
+    fn save_failure_keeps_picker_open_and_original_file_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(&path, "invalid json").unwrap();
+        let mut app = model::demo();
+        app.theme_path = Some(path.clone());
+        key(&mut app, KeyCode::Char('t'));
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.theme_picker.is_some());
+        assert!(
+            app.theme_notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Could not save:")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid json");
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.theme, theme::Theme::Strata);
     }
     #[test]
     fn vim_views_selection_and_gg_g() {

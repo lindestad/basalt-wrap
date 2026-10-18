@@ -39,6 +39,7 @@ GPU processes include both compute and graphics workloads, sorted by VRAM usage 
 | Ctrl+B / Ctrl+F, PageUp / PageDown | Page up / down |
 | Enter | Open the selected request's details |
 | `p` / Esc | Focus GPU processes / return |
+| `t` | Open the theme picker; `hjkl` previews, Enter applies, Esc cancels |
 | `b` | Open Strata's web dashboard |
 | `?` / Esc | Open / close help |
 | `q`, Ctrl+C | Stop Strata and exit; repeat to force |
@@ -53,6 +54,51 @@ strata-wrap iq3_s -- --idle-unload 120   # Forward Strata server options after -
 ```
 
 The server stays on loopback, with the API key read from its model config. The existing web dashboard remains available on port 8080; `--port` changes both the listener and monitoring address. Logs rotate at 8 MiB with three backups under `~/.local/state/strata-wrap/`. Strata's native engine log remains at the path in its config.
+
+## Themes
+
+The original palette, `strata`, remains the default. Press `t` to preview themes
+on the dashboard. Move with `hjkl`, arrow keys, or Tab. Enter saves the selection
+for future launches; Esc restores the previous palette. This also works while
+the model is generating.
+
+| Theme | Appearance |
+| --- | --- |
+| `strata` | Midnight blue with sea glass and lavender |
+| `ember` | Black and white with burnt orange accents and graphs |
+| `monochrome` | Grayscale throughout, including status indicators and graphs |
+| `nord` | Polar slate with frost blue and muted aurora colors |
+| `dracula` | Charcoal violet with bright pastel accents |
+| `gruvbox` | Warm charcoal with earthy gold and aqua |
+| `catppuccin` | Mocha with soft teal and mauve |
+| `solarized-light` | Warm ivory with blue and violet accents |
+
+![Theme gallery](docs/themes.png)
+
+```sh
+strata-wrap iq3_s --theme ember         # Override the saved theme for this launch
+strata-wrap --list-themes
+strata-wrap --preview --theme ember     # Run alongside an existing session
+```
+
+`--preview` (also available as `--demo`) uses sample data. It starts no server,
+opens no listener, and makes no systemd, VRAM, or preference changes. Press `t`
+to try palettes and `q` to close it. The running model continues independently.
+You can also launch `./strata-wrap --preview` from a separately built worktree.
+
+Normal sessions save confirmed selections to
+`$XDG_CONFIG_HOME/strata-wrap/preferences.json`, or
+`~/.config/strata-wrap/preferences.json` when that variable is unset.
+`--theme` takes precedence without saving; selecting a theme in the picker saves
+it. A running session keeps its own palette when another session changes the
+saved choice. Snapshots default to `strata`; pass `--theme` to render another
+palette.
+
+The inspired palettes adapt [Nord](https://www.nordtheme.com/docs/colors-and-palettes/),
+[Dracula](https://draculatheme.com/contribute),
+[Gruvbox](https://github.com/morhetz/gruvbox),
+[Catppuccin Mocha](https://github.com/catppuccin/catppuccin), and
+[Solarized](https://ethanschoonover.com/solarized/) for this dashboard.
 
 ## VRAM policy
 
@@ -88,4 +134,4 @@ cargo fmt --check
 cargo build --release --locked
 ```
 
-Tests cover weighted session throughput, navigation, scrolling, resize timing, no-op handling, small-terminal rendering, and the process-panel height limit. Integration tests use the real systemd user manager and a Rust HTTP fixture whose child escapes into a new session and ignores SIGTERM. They exercise interrupt, hangup, termination, launcher and worker SIGKILL, service stop, server crashes, duplicate launches, and installation. The ignored `fixture_process` test is the child fixture entry point, not a skipped check. Integration tests use port 18089 and remove their transient services afterward.
+Tests cover weighted session throughput, navigation, scrolling, resize timing, no-op handling, all palettes and overlays at small terminal sizes, grayscale output, theme selection and persistence, preview isolation, and the process-panel height limit. Integration tests use the real systemd user manager and a Rust HTTP fixture whose child escapes into a new session and ignores SIGTERM. They exercise interrupt, hangup, termination, launcher and worker SIGKILL, service stop, server crashes, duplicate launches, and installation. The ignored `fixture_process` test is the child fixture entry point, not a skipped check. Integration tests use port 18089 and remove their transient services afterward.
