@@ -1,5 +1,7 @@
 mod app;
 mod config;
+mod control;
+mod doctor;
 mod hardware;
 mod install;
 mod model;
@@ -18,6 +20,27 @@ use std::path::PathBuf;
     about = "A Strata inference dashboard and elastic VRAM supervisor"
 )]
 pub struct Args {
+    /// Validate the checkout, model, systemd user manager, GPU, and effective policy
+    #[arg(long)]
+    pub doctor: bool,
+    /// Create a config for an existing checkout/model and detected GPU; never overwrite
+    #[arg(long)]
+    pub setup: bool,
+    /// Monitor an existing worker or server; quitting never stops it
+    #[arg(long)]
+    pub attach: bool,
+    /// Select a named model/policy profile from the wrapper config
+    #[arg(long)]
+    pub profile: Option<String>,
+    #[arg(long)]
+    pub list_profiles: bool,
+    /// Generate a completion script for your shell
+    #[arg(long, value_enum)]
+    pub completions: Option<clap_complete::Shell>,
+
+    /// Show request ages with seconds (toggle with a)
+    #[arg(long)]
+    pub age_seconds: bool,
     /// Per-user wrapper settings (distinct from the positional Strata model JSON)
     #[arg(long = "config")]
     pub wrapper_config: Option<PathBuf>,
@@ -174,15 +197,55 @@ impl Args {
 fn run() -> Result<i32> {
     let matches = Args::command().get_matches();
     let mut args = Args::from_arg_matches(&matches)?;
-    config::apply(&mut args, &matches)?;
+    if let Some(shell) = args.completions {
+        clap_complete::generate(
+            shell,
+            &mut Args::command(),
+            "strata-wrap",
+            &mut std::io::stdout(),
+        );
+        return Ok(0);
+    }
+    if let Err(error) = config::apply(&mut args, &matches) {
+        if (args.diagnose || args.attach) && control::socket_path(&args).exists() {
+            args.validate()?;
+            return if args.diagnose {
+                runtime::diagnose(&args)
+            } else {
+                app::attach(&args)
+            };
+        }
+        return Err(error);
+    }
     args.validate()?;
     if args.init_config {
         config::initialize(&args.settings_path)?;
         return Ok(0);
     }
+    if args.list_profiles {
+        for name in config::load(&args.settings_path, true)?.profiles.keys() {
+            println!("{name}");
+        }
+        return Ok(0);
+    }
+    if args.setup {
+        return doctor::setup(&args);
+    }
+    if args.doctor {
+        return doctor::run(&args);
+    }
+    if args.attach {
+        return app::attach(&args);
+    }
     if args.check_config {
         config::load(&args.settings_path, true)?;
-        println!("Valid wrapper config: {}", args.settings_path.display());
+        if args.model.is_some() {
+            return doctor::run(&args);
+        }
+        println!(
+            "Valid wrapper settings: {} (use --doctor MODEL to check the setup)",
+            args.settings_path.display()
+        );
         return Ok(0);
     }
     if args.list_gpus {
@@ -207,6 +270,9 @@ fn run() -> Result<i32> {
     if args.demo || args.snapshot.is_some() {
         return app::demo(&args);
     }
+    if args.diagnose && crate::control::socket_path(&args).exists() {
+        return runtime::diagnose(&args);
+    }
     if args.model.is_none() {
         bail!("choose iq3_s, ud-iq3_s, or a model JSON path (use --help)");
     }
@@ -215,6 +281,9 @@ fn run() -> Result<i32> {
     } else {
         let model = runtime::read_config(&args)?;
         config::resolve_model(&mut args, &model)?;
+        if !args.diagnose {
+            config::validate_model(&args, &model)?;
+        }
         if args.diagnose {
             runtime::diagnose(&args)
         } else {

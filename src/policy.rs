@@ -30,6 +30,7 @@ pub struct Policy {
     pub poll: f64,
     pub quiet_since: Option<f64>,
     pub growth_mode: GrowthMode,
+    pub growth_paused: bool,
     pub step: u64,
     pub margin: u64,
     pub retry_delay: f64,
@@ -50,6 +51,7 @@ impl Policy {
             poll,
             quiet_since: None,
             growth_mode: GrowthMode::Idle,
+            growth_paused: false,
             step: 512,
             margin: 16,
             retry_delay: 60.,
@@ -87,7 +89,8 @@ impl Policy {
         self.activity = Some(s.activity.clone());
         let resized = self.last_cache.is_some_and(|c| c != s.cache);
         self.last_cache = Some(s.cache);
-        if (self.growth_mode == GrowthMode::Idle && (s.busy || changed))
+        if self.growth_paused
+            || (self.growth_mode == GrowthMode::Idle && (s.busy || changed))
             || resized
             || s.used >= self.grow_below
             || s.cache >= s.full
@@ -120,7 +123,8 @@ impl Policy {
                 reserve: s.free.saturating_add(self.step).saturating_add(self.margin),
                 before: s.cache,
             })
-        } else if (!s.busy || self.growth_mode == GrowthMode::Capacity)
+        } else if !self.growth_paused
+            && (!s.busy || self.growth_mode == GrowthMode::Capacity)
             && s.used < self.grow_below
             && s.cache < s.full
             && !self.blocked.iter().any(|(g, _, _)| *g)
@@ -181,6 +185,9 @@ impl Policy {
         };
         if s.free < self.min_free {
             return "Pressure · waiting to shrink".into();
+        }
+        if self.growth_paused {
+            return "Growth paused · pressure shrinking enabled".into();
         }
         if s.cache >= s.full {
             return "Holding · full expert cache".into();
@@ -396,5 +403,16 @@ mod tests {
             assert!(p.observe(0., s.clone()).is_none());
             assert!(p.observe(2., s).is_none());
         }
+    }
+    #[test]
+    fn pausing_growth_keeps_pressure_shrinking_enabled() {
+        let mut p = Policy::new(1024, 14336, 0., 2.);
+        p.growth_mode = GrowthMode::Capacity;
+        p.growth_paused = true;
+        let mut s = sample();
+        assert!(p.observe(0., s.clone()).is_none());
+        assert!(p.observe(2., s.clone()).is_none());
+        s.free = 500;
+        assert!(!p.observe(4., s).unwrap().grow);
     }
 }

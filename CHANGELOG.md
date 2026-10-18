@@ -2,6 +2,20 @@
 
 ## 0.3.0 (unreleased)
 
+- Fetch all retained request history, default ages to whole minutes, and refresh
+  them every 30 seconds or on new entries. Add `a` and `--age-seconds` for seconds.
+- Add a Policy view with memory graphs and resize outcomes. Keep policy status
+  visible in smaller layouts.
+- Read effective settings from a private worker socket. Add growth pause,
+  reconciled recovery, and a preview before reloading VRAM settings.
+- Add read-only attachment, named profiles, a general setup command, full setup
+  checks, and shell completions.
+- Account for active parallel slots separately and mark incomplete live totals.
+- Bound event queues and UI event processing. Add controller, socket, profile,
+  age-refresh, layout, and attachment tests.
+- Require release tags to pass the full quality checks. Include docs/examples
+  and checksums with binary releases.
+
 - Add per-user JSON settings for GPU selection, VRAM thresholds, growth timing,
   step size, retry cooldown, and themes. CLI options override saved settings.
 - Size automatic thresholds from the selected NVIDIA card's measured VRAM.

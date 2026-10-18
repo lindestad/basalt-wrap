@@ -70,3 +70,33 @@ fn saved_theme_is_used_cli_wins_and_preview_preserves_config() {
     assert_ne!(saved.stdout, override_theme.stdout);
     assert_eq!(fs::read_to_string(path).unwrap(), config);
 }
+
+#[test]
+fn doctor_checks_missing_setup_and_completions_need_no_config() {
+    let root = tempfile::tempdir().unwrap();
+    let result = run(
+        root.path(),
+        &[
+            "--doctor",
+            "--strata-dir",
+            "/nonexistent-strata-wrap-doctor",
+            "/nonexistent-strata-wrap-doctor/model.json",
+        ],
+    );
+    assert!(!result.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(report["read_only"], true);
+    assert_eq!(report["ok"], false);
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["check"] == "model and policy" && c["ok"] == false)
+    );
+    std::fs::create_dir_all(root.path().join("strata-wrap")).unwrap();
+    std::fs::write(root.path().join("strata-wrap/config.json"), "invalid").unwrap();
+    let completion = run(root.path(), &["--completions", "fish"]);
+    assert!(completion.status.success());
+    assert!(String::from_utf8_lossy(&completion.stdout).contains("complete -c strata-wrap"));
+}

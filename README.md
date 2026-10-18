@@ -35,12 +35,13 @@ path and enable elastic mode in that config.
 ## Dashboard
 
 - Live prefill or decode speed in the first card, switching with the current phase, plus prompt progress, elapsed time, and queued requests. Prefill shows the engine-reported rate for the current prompt.
-- Session input and output tokens, prompt reuse, and average output speed. The session average is **total output tokens / active decode seconds**. Idle time and prompt processing are excluded. In-flight output is included using Strata's reported mean decode rate.
+- Session input and output tokens, prompt reuse, and average output speed. The session average is **total output tokens / active decode seconds**. Idle time and prompt processing are excluded. In-flight output is included using Strata's reported mean decode rate. With parallel inference, this is a per-request decode average; active slot counters are summed. If Strata reports work outside those slots, live token totals are marked `≥` and the average is unavailable until accounting is complete.
 - GPU utilization, temperature, power, VRAM, PCIe traffic, CPU use, disk throughput, RAM, and swap.
 - Model memory from the service's processes: proportional resident memory (PSS), anonymous/file/shared pages, locked memory, and total memory charged to the service group. Locked memory is part of resident memory; service-group accounting also includes charged file cache. These measurements overlap and should not be added together.
 - Context occupancy, KV configuration, expert-cache size, resize state, MTP acceptance, and conversation-cache occupancy, restores, and evictions.
-- Request history with prefill/decode rates, cache reuse, expert hits, duration, and completion reason. Prefill rates use the actual tokens read when the engine reports them, with prompt minus reused tokens as the fallback for older engines. Select a request for its timing and token details.
+- All retained request history (up to Strata's 500-entry limit), with prefill/decode rates, cache reuse, expert hits, duration, and completion reason. Prefill rates use the actual tokens read when the engine reports them, with prompt minus reused tokens as the fallback for older engines. Select a request for its timing and token details.
 - A scrolling log that retains its position when new output arrives.
+- A Policy view with free-VRAM and expert-cache graphs, resize targets, actual cache changes, wait times, and results. Its history keeps the latest 100 resize attempts.
 
 GPU processes include both compute and graphics workloads, sorted by VRAM usage and deduplicated by PID. The panel occupies at most one quarter of terminal height and disappears when that space cannot fit a header and three entries. Press `p` to scroll through processes beyond the visible rows. Missing driver counters are reported as unavailable. GPU readings use NVML directly. The VRAM bar counts all non-free memory, including driver-reserved memory, so used plus free equals total before display rounding. The breakdown separates Strata, other allocations, and driver-reserved memory. The growth threshold uses that same used total. RAM used is total minus available, including reclaimable memory in the available figure. Values displayed in GiB are rounded independently to one decimal place.
 
@@ -49,17 +50,23 @@ GPU processes include both compute and graphics workloads, sorted by VRAM usage 
 | Keys | Action |
 | --- | --- |
 | `h` / `l`, left / right | Previous / next view |
-| `1` / `2` / `3`, Tab | Overview / requests / logs |
+| `1` / `2` / `3` / `4`, Tab | Overview / requests / logs / policy |
 | `j` / `k`, down / up | Select requests or scroll logs / focused GPU processes |
 | `gg` / `G`, Home / End | First / last request; oldest / newest logs |
 | Ctrl+U / Ctrl+D | Half-page up / down |
 | Ctrl+B / Ctrl+F, PageUp / PageDown | Page up / down |
 | Enter | Open the selected request's details |
+| `a` | Toggle request ages between minutes and seconds |
+| Space | Pause/resume growth; pressure shrinking stays enabled |
+| `r` | Reconcile fresh engine/GPU state and resume management after an error |
+| `c` | Preview VRAM settings from disk; Enter applies, Esc cancels |
 | `p` / Esc | Focus GPU processes / return |
 | `t` | Open the theme picker; `hjkl` previews, Enter applies, Esc cancels |
 | `b` | Open Strata's web dashboard |
 | `?` / Esc | Open / close help |
 | `q`, Ctrl+C | Stop Strata and exit; repeat to force |
+
+Request ages default to whole minutes and refresh every 30 seconds or when a new entry arrives. Use `--age-seconds`, `age_seconds: true` in the wrapper config, or `a` for seconds. Seconds refresh once per second. The toggle applies to the current dashboard.
 
 The layout adapts to terminal size, with a compact summary below 50 columns or 14 rows. `NO_COLOR` is respected. Redirected output uses plain summaries automatically; `--plain` selects those explicitly and `--raw` includes unfiltered server output in plain mode.
 
@@ -109,7 +116,8 @@ You can also launch `./strata-wrap --preview` from a separately built worktree.
 Normal sessions save confirmed selections in the selected wrapper config, which
 defaults to `~/.config/strata-wrap/config.json` (under `$XDG_CONFIG_HOME` when set).
 `--theme` takes precedence without saving; selecting a theme in the picker saves
-it to the wrapper config. Existing `preferences.json` themes remain a fallback
+it to the selected profile, or the wrapper config when no profile is selected.
+Existing `preferences.json` themes remain a fallback
 until a theme is saved in the new config. A running session keeps its own palette
 when another session changes the saved choice. Snapshots use the configured
 theme, or `strata` when none is configured. Pass `--theme` to render another
@@ -132,11 +140,12 @@ Create and validate a per-user config:
 strata-wrap --init-config
 strata-wrap --check-config
 strata-wrap --list-gpus
+strata-wrap /path/to/model.json --doctor
 ```
 
 Settings live at `$XDG_CONFIG_HOME/strata-wrap/config.json`, or
 `~/.config/strata-wrap/config.json`. Use `--config /path/to/config.json` for
-another profile and `--no-config` to use built-in defaults. CLI options override
+another settings file and `--no-config` to use built-in defaults. CLI options override
 saved settings. Model JSON files remain separate: the positional model selects
 Strata's own config, while `--config` selects the wrapper's settings.
 
@@ -168,6 +177,38 @@ selection to Strata and NVML, so monitoring and resize decisions follow the
 engine's card. Elastic management supports one NVIDIA GPU per model; layer
 splits and peer-GPU expert caches are unsupported.
 
+### Profiles and setup
+
+Named profiles inherit global settings. Profile VRAM fields override only the
+fields they contain; CLI options override the resulting profile.
+
+```json
+{
+  "strata_dir": "~/apps/Strata",
+  "vram": { "growth_mode": "capacity" },
+  "profiles": {
+    "regular": { "model": "iq3_s" },
+    "ud": { "model": "ud-iq3_s", "theme": "ember" }
+  }
+}
+```
+
+```sh
+strata-wrap --list-profiles
+strata-wrap --profile ud
+strata-wrap --profile ud --doctor
+strata-wrap /path/to/model.json --strata-dir /path/to/Strata --setup
+strata-wrap --completions fish
+```
+
+`--setup` creates a config for an existing model/checkout using the selected
+GPU's UUID. It refuses to overwrite a config and does not edit model JSON or
+shell bindings. `--doctor` checks the checkout, Python executable, native engine,
+model, systemd user manager, selected GPU, thresholds, and resize segment size.
+It reports an occupied port without stopping its server. `--check-config`
+validates the settings file; when a model is selected it also runs those checks.
+Completions support Bash, Fish, Zsh, PowerShell, and Elvish.
+
 ## VRAM policy
 
 The supervisor requests a cache reduction when free VRAM drops below the
@@ -196,9 +237,34 @@ To inspect a running server without starting or resizing it:
 strata-wrap iq3_s --diagnose
 ```
 
-The report includes measured GPU memory, selected policy, live cache size,
-inference activity, and growth blockers. It does not include prompts, responses,
-or the API key. The TUI shows the running worker's countdown and pending state.
+For a current worker, the report reads its effective settings, actual policy
+state, pending resize, recent results, version, and telemetry age from a private
+user socket. Editing a config does not change what the report says is running.
+For an older wrapper or an external server, it falls back to server counters and
+current file settings and labels that source explicitly. Prompts, responses,
+and API keys are excluded from the report.
+
+Press Space to pause growth while keeping pressure shrinking enabled. A queued
+resize remains queued. Press `r` to reconcile fresh loaded-engine and GPU state
+before resuming after an error. Both recovery and reload refuse to run during a
+pending resize. Press `c` to preview VRAM settings from disk, then Enter to
+apply. Reload affects VRAM settings only, takes precedence over startup CLI
+policy overrides, and starts a fresh growth timer. GPU, model, port, and unit
+changes require a new launch.
+
+### Attach without taking ownership
+
+```sh
+strata-wrap --attach                         # Current managed worker
+strata-wrap --attach --unit another-worker
+strata-wrap /path/to/model.json --attach      # Existing external Strata server
+```
+
+Attachments are read-only: `q` or Ctrl+C closes the dashboard and leaves the
+server running. They cannot reload settings or control VRAM. Theme selections
+in attachments are temporary. External attachments cannot know the worker's
+policy or service memory ownership; those fields are reported as unavailable.
+The normal launcher still owns its service and stops it when it exits.
 
 ## Shutdown
 

@@ -55,13 +55,14 @@ pub fn launch(args: &Args) -> Result<i32> {
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
     app.step_mib = args.step_mib;
+    app.age_seconds = args.age_seconds;
     configure_theme(&mut app, args);
     let signal = runtime::signals()?;
     let mut runner = Runner {
         child: runtime::launch_command(args)?.spawn()?,
         args,
     };
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::sync_channel(256);
     if let Some(pipe) = runner.child.stdout.take() {
         let tx = tx.clone();
         thread::spawn(move || {
@@ -77,6 +78,7 @@ pub fn launch(args: &Args) -> Result<i32> {
         });
     }
     if let Some(pipe) = runner.child.stderr.take() {
+        let tx = tx.clone();
         thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if tx
@@ -103,7 +105,7 @@ pub fn launch(args: &Args) -> Result<i32> {
     let mut last_stop = Instant::now() - Duration::from_secs(1);
     let mut force = false;
     let exit = loop {
-        while let Ok(event) = rx.try_recv() {
+        for event in rx.try_iter().take(128) {
             if !interactive {
                 plain(&event, args.raw, &mut last_stamp);
             }
@@ -127,7 +129,7 @@ pub fn launch(args: &Args) -> Result<i32> {
                         if quit {
                             force = app.stopping;
                             app.stopping = true;
-                        } else {
+                        } else if !control_key(&mut app, args, key.code, &tx) {
                             key_event(&mut app, key);
                         }
                     }
@@ -277,7 +279,11 @@ pub fn key_action(app: &mut App, key: KeyCode) {
             }
             KeyCode::Enter => {
                 if let Some(path) = &app.theme_path
-                    && let Err(e) = theme::save(path, app.theme)
+                    && let Err(e) = if app.theme_profile.is_some() {
+                        theme::save_profile(path, app.theme, app.theme_profile.as_deref())
+                    } else {
+                        theme::save(path, app.theme)
+                    }
                 {
                     app.theme_notice = Some(format!("Could not save: {e}. Esc cancels."));
                     return;
@@ -293,6 +299,15 @@ pub fn key_action(app: &mut App, key: KeyCode) {
         if matches!(key, KeyCode::Esc | KeyCode::Char('?')) {
             app.help = false;
         }
+        return;
+    }
+    if key == KeyCode::Esc && app.control_notice.is_some() {
+        app.control_notice = None;
+        return;
+    }
+    if key == KeyCode::Char('a') {
+        app.age_seconds = !app.age_seconds;
+        app.refresh_ages();
         return;
     }
     if key == KeyCode::Char('t') {
@@ -348,6 +363,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Left | KeyCode::Char('h') => {
             app.view = match app.view {
+                View::Policy => View::Logs,
                 View::Logs => View::Requests,
                 _ => View::Overview,
             };
@@ -356,7 +372,8 @@ pub fn key_action(app: &mut App, key: KeyCode) {
         KeyCode::Right | KeyCode::Char('l') => {
             app.view = match app.view {
                 View::Overview => View::Requests,
-                _ => View::Logs,
+                View::Requests => View::Logs,
+                _ => View::Policy,
             };
             app.scroll = 0;
         }
@@ -371,6 +388,10 @@ pub fn key_action(app: &mut App, key: KeyCode) {
             app.view = View::Requests;
             app.scroll = 0;
         }
+        KeyCode::Char('4') => {
+            app.view = View::Policy;
+            app.scroll = 0;
+        }
         KeyCode::Char('3') => {
             app.view = View::Logs;
             app.scroll = 0;
@@ -379,7 +400,8 @@ pub fn key_action(app: &mut App, key: KeyCode) {
             app.view = match app.view {
                 View::Overview => View::Requests,
                 View::Requests => View::Logs,
-                View::Logs => View::Overview,
+                View::Logs => View::Policy,
+                View::Policy => View::Overview,
             };
             app.scroll = 0;
         }
@@ -395,11 +417,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
             if app.view == View::Logs {
                 app.scroll = app.scroll.saturating_sub(1);
             } else {
-                app.scroll = (app.scroll + 1).min(
-                    app.metrics.data["requests"]
-                        .as_array()
-                        .map_or(0, |a| a.len().saturating_sub(1)),
-                );
+                app.scroll = (app.scroll + 1).min(app.list_len().saturating_sub(1));
             }
         }
         KeyCode::PageUp => {
@@ -423,9 +441,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
             app.scroll = if app.view == View::Logs {
                 0
             } else {
-                app.metrics.data["requests"]
-                    .as_array()
-                    .map_or(0, |a| a.len().saturating_sub(1))
+                app.list_len().saturating_sub(1)
             };
         }
         KeyCode::Char('b') => {
@@ -445,6 +461,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
 pub fn demo(args: &Args) -> Result<i32> {
     let mut app = model::demo();
     app.step_mib = args.step_mib;
+    app.age_seconds = args.age_seconds;
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
     configure_theme(&mut app, args);
@@ -493,6 +510,7 @@ fn configure_theme(app: &mut App, args: &Args) {
         })
     };
     if !app.demo {
+        app.theme_profile = args.profile.clone();
         app.theme_path = Some(if args.settings_path.as_os_str().is_empty() {
             crate::config::default_path()
         } else {
@@ -515,6 +533,194 @@ fn viewport(app: &mut App, height: u16) {
             .len()
             .saturating_sub(app.process_rows),
     );
+}
+
+fn control_key(app: &mut App, args: &Args, key: KeyCode, tx: &mpsc::SyncSender<Event>) -> bool {
+    use crate::control::{self, Command};
+    if app.attached || app.demo || app.help || app.theme_picker.is_some() {
+        return false;
+    }
+    let command = if let Some(preview) = &app.reload_preview {
+        match key {
+            KeyCode::Esc => {
+                app.reload_preview = None;
+                return true;
+            }
+            KeyCode::Enter => match serde_json::from_value(preview["proposed"].clone()) {
+                Ok(effective) => Command::Reload(effective),
+                Err(_) => return true,
+            },
+            _ => return true,
+        }
+    } else {
+        match key {
+            KeyCode::Char(' ') => {
+                Command::PauseGrowth(!app.supervisor.as_ref().is_some_and(|s| s.growth_paused))
+            }
+            KeyCode::Char('r') => Command::Resume,
+            KeyCode::Char('c') => Command::PreviewReload,
+            _ => return false,
+        }
+    };
+    let preview = matches!(command, Command::PreviewReload);
+    if app.control_pending {
+        return true;
+    }
+    app.control_pending = true;
+    app.control_notice = Some("Waiting for worker…".into());
+    app.reload_preview = None;
+    let args = args.clone();
+    let tx = tx.clone();
+    thread::spawn(move || {
+        let result = control::call(&args, command).map_err(|e| e.to_string());
+        let _ = tx.send(Event::ControlReply { preview, result });
+    });
+    true
+}
+
+pub fn attach(args: &Args) -> Result<i32> {
+    use crate::{control, hardware::Collector};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let managed = control::socket_path(args).exists();
+    let mut app = App::new("Attached server".into(), args.port.unwrap_or(8080));
+    app.attached = true;
+    app.age_seconds = args.age_seconds;
+    configure_theme(&mut app, args);
+    app.theme_path = None;
+    let (api, gpu) = if managed {
+        let state: control::Snapshot =
+            serde_json::from_value(control::call(args, control::Command::Status)?)?;
+        app.address = format!("127.0.0.1:{}", state.port);
+        app.apply(Event::Supervisor(Box::new(state)));
+        (None, 0)
+    } else {
+        anyhow::ensure!(
+            args.model.is_some(),
+            "choose the running server's model config, or the managed worker's --unit"
+        );
+        let mut resolved = args.clone();
+        let model = runtime::read_config(args)?;
+        crate::config::resolve_model(&mut resolved, &model)?;
+        let port = args
+            .port
+            .unwrap_or_else(|| model["port"].as_u64().unwrap_or(8080) as u16);
+        app.address = format!("127.0.0.1:{port}");
+        app.policy = "Read-only attachment · external policy unknown".into();
+        (
+            Some(runtime::Api::new(
+                port,
+                model["api_key"].as_str().unwrap_or(""),
+            )?),
+            resolved.gpu.as_deref().unwrap_or("0").parse()?,
+        )
+    };
+    let (tx, rx) = mpsc::sync_channel(8);
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    let settings = args.clone();
+    thread::spawn(move || {
+        let mut collector = Collector::new(gpu);
+        collector.external = true;
+        while !flag.load(Ordering::Relaxed) {
+            let result = (|| -> Result<Vec<Event>> {
+                if managed {
+                    let snapshot: control::Snapshot = serde_json::from_value(control::call(
+                        &settings,
+                        control::Command::Status,
+                    )?)?;
+                    let mut events = Vec::new();
+                    if control::epoch() - snapshot.metrics_at < 4.
+                        && let Some(metrics) = &snapshot.metrics
+                    {
+                        events.push(Event::Metrics(metrics.clone()));
+                    }
+                    if let Some(hardware) = &snapshot.hardware {
+                        events.push(Event::Hardware(Box::new(hardware.clone())));
+                    }
+                    events.push(Event::Supervisor(Box::new(snapshot)));
+                    Ok(events)
+                } else {
+                    let api = api.as_ref().unwrap();
+                    Ok(vec![
+                        Event::Metrics(model::Metrics {
+                            status: api.get("/v1/status")?,
+                            data: api.get("/metrics?requests=all")?,
+                        }),
+                        Event::Hardware(Box::new(collector.sample())),
+                    ])
+                }
+            })();
+            match result {
+                Ok(events) => {
+                    for event in events {
+                        if tx.send(event).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(error) => {
+                    if tx
+                        .send(Event::Log {
+                            message: format!("Attachment: {error}"),
+                            raw: false,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            for _ in 0..10 {
+                if flag.load(Ordering::Relaxed) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    });
+    let signal = runtime::signals()?;
+    let interactive =
+        !args.plain && std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+    let mut terminal = if interactive {
+        Some(ratatui::try_init()?)
+    } else {
+        None
+    };
+    let _reset = TerminalReset(interactive);
+    let mut stamp = 0.;
+    loop {
+        for event in rx.try_iter().take(128) {
+            if !interactive {
+                plain(&event, args.raw, &mut stamp);
+            }
+            app.apply(event);
+        }
+        if signal.swap(false, Ordering::Relaxed) {
+            break;
+        }
+        if let Some(terminal) = &mut terminal {
+            terminal.draw(|f| {
+                viewport(&mut app, f.area().height);
+                ui::render(f, &app)
+            })?;
+            if event::poll(Duration::from_millis(80))?
+                && let TermEvent::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press
+            {
+                if key.code == KeyCode::Char('q')
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    break;
+                }
+                key_event(&mut app, key);
+            }
+        } else {
+            thread::sleep(Duration::from_millis(80));
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    Ok(0)
 }
 
 #[cfg(test)]

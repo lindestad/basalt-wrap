@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::VecDeque, time::Instant};
 
+fn epoch() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
+}
+
 pub fn number(value: &Value, path: &str) -> f64 {
     value
         .pointer(path)
@@ -78,27 +85,44 @@ impl Metrics {
     }
     pub fn totals(&self) -> Totals {
         let active = self.busy();
-        let generated = if active {
-            number(&self.data, "/live/generated")
+        let parallel = number(&self.data, "/live/parallel") > 0.;
+        let slots = self.data.pointer("/live/slots").and_then(Value::as_array);
+        let (generated, live_input, live_seconds) = if parallel {
+            slots
+                .into_iter()
+                .flatten()
+                .filter(|s| text(s, "/state") != "idle")
+                .fold((0., 0., 0.), |(out, input, seconds), slot| {
+                    let generated = number(slot, "/generated");
+                    let rate = number(slot, "/tok_s");
+                    (
+                        out + generated,
+                        input + number(slot, "/prompt_tokens"),
+                        seconds + if rate > 0. { generated / rate } else { 0. },
+                    )
+                })
+        } else if active {
+            let generated = number(&self.data, "/live/generated");
+            let mean = number(&self.data, "/live/tok_s_mean");
+            (
+                generated,
+                number(&self.data, "/live/prompt_tokens"),
+                if generated > 0. && mean > 0. {
+                    generated / mean
+                } else {
+                    0.
+                },
+            )
         } else {
-            0.0
+            (0., 0., 0.)
         };
-        let mean = number(&self.data, "/live/tok_s_mean");
         let output = number(&self.data, "/totals/output_tokens");
-        let seconds = number(&self.data, "/totals/decode_ms") / 1000.0;
-        let live_seconds = if generated > 0.0 && mean > 0.0 {
-            generated / mean
-        } else {
-            0.0
-        };
+        let seconds = number(&self.data, "/totals/decode_ms") / 1000.;
         let rate_tokens = output + if live_seconds > 0.0 { generated } else { 0.0 };
         Totals {
-            input: number(&self.data, "/totals/prompt_tokens") as u64
-                + if active {
-                    number(&self.data, "/live/prompt_tokens") as u64
-                } else {
-                    0
-                },
+            partial: parallel
+                && (slots.is_none() || number(&self.data, "/live/outside_slots") > 0.),
+            input: number(&self.data, "/totals/prompt_tokens") as u64 + live_input as u64,
             output: (output + generated) as u64,
             reused: number(&self.data, "/totals/reused") as u64,
             requests: number(&self.data, "/totals/requests") as u64,
@@ -114,6 +138,7 @@ impl Metrics {
 
 #[derive(Clone, Debug, Default)]
 pub struct Totals {
+    pub partial: bool,
     pub input: u64,
     pub output: u64,
     pub reused: u64,
@@ -125,6 +150,11 @@ pub struct Totals {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    Supervisor(Box<crate::control::Snapshot>),
+    ControlReply {
+        preview: bool,
+        result: Result<Value, String>,
+    },
     Metrics(Metrics),
     Hardware(Box<Hardware>),
     Log {
@@ -144,13 +174,23 @@ pub enum View {
     Overview,
     Requests,
     Logs,
+    Policy,
 }
 
 pub struct App {
+    pub supervisor: Option<Box<crate::control::Snapshot>>,
+    pub reload_preview: Option<serde_json::Value>,
+    pub control_notice: Option<String>,
+    pub control_pending: bool,
+    pub age_seconds: bool,
+    pub age_now: f64,
+    age_updated: Instant,
+    pub attached: bool,
     pub step_mib: u64,
     pub theme: crate::theme::Theme,
     pub theme_picker: Option<crate::theme::Theme>,
     pub theme_path: Option<std::path::PathBuf>,
+    pub theme_profile: Option<String>,
     pub theme_notice: Option<String>,
     pub model: String,
     pub address: String,
@@ -184,10 +224,19 @@ pub struct App {
 impl App {
     pub fn new(model: String, port: u16) -> Self {
         Self {
+            supervisor: None,
+            reload_preview: None,
+            control_notice: None,
+            control_pending: false,
+            age_seconds: false,
+            age_now: epoch(),
+            age_updated: Instant::now(),
+            attached: false,
             step_mib: 512,
             theme: crate::theme::Theme::default(),
             theme_picker: None,
             theme_path: None,
+            theme_profile: None,
             theme_notice: None,
             model,
             address: format!("127.0.0.1:{port}"),
@@ -220,7 +269,65 @@ impl App {
     }
     pub fn apply(&mut self, event: Event) {
         match event {
+            Event::ControlReply { preview, result } => {
+                self.control_pending = false;
+                match result {
+                    Ok(value) => {
+                        if preview {
+                            self.reload_preview = Some(value);
+                            self.control_notice = None;
+                        } else {
+                            self.reload_preview = None;
+                            self.control_notice = Some(
+                                "Policy updated · growth timer restarted; queued resize unchanged"
+                                    .into(),
+                            );
+                            if let Some(paused) = value["growth_paused"].as_bool()
+                                && let Some(state) = &mut self.supervisor
+                            {
+                                state.growth_paused = paused;
+                            }
+                        }
+                    }
+                    Err(error) => self.control_notice = Some(error),
+                }
+            }
+            Event::Supervisor(snapshot) => {
+                if self.view == View::Policy
+                    && self.scroll > 0
+                    && let Some(old) = &self.supervisor
+                {
+                    let old_selected = old
+                        .resize_history
+                        .iter()
+                        .rev()
+                        .nth(self.scroll)
+                        .map(|r| r.at);
+                    if let Some(at) = old_selected
+                        && let Some(index) = snapshot
+                            .resize_history
+                            .iter()
+                            .rev()
+                            .position(|r| r.at == at)
+                    {
+                        self.scroll = index;
+                    }
+                }
+                self.step_mib = snapshot.effective.step_mib;
+                self.min_free_mib = snapshot.effective.min_free_mib;
+                self.grow_below_mib = snapshot.effective.grow_below_mib;
+                self.policy = snapshot.policy.clone();
+                self.resize_pending = snapshot.pending;
+                self.supervisor = Some(snapshot);
+            }
             Event::Metrics(metrics) => {
+                let new_entry = self.metrics.last()["time"] != metrics.last()["time"];
+                if new_entry
+                    || self.age_updated.elapsed().as_secs() >= if self.age_seconds { 1 } else { 30 }
+                {
+                    self.age_now = epoch();
+                    self.age_updated = Instant::now();
+                }
                 if self.scroll > 0 && self.view != View::Logs {
                     let selected = self
                         .metrics
@@ -245,16 +352,16 @@ impl App {
                     0.0
                 };
                 self.tps.push_back((speed * 10.0) as u64);
-                self.tps.truncate_front(120);
+                RingLimit::truncate_front(&mut self.tps, 120);
                 self.metrics = metrics;
                 self.connected = true;
                 self.updated = Some(Instant::now());
             }
             Event::Hardware(hw) => {
                 self.gpu_load.push_back(hw.gpu_util.unwrap_or(0) as u64);
-                self.gpu_load.truncate_front(60);
+                RingLimit::truncate_front(&mut self.gpu_load, 60);
                 self.ram.push_back(hw.ram_used / 1048576);
-                self.ram.truncate_front(60);
+                RingLimit::truncate_front(&mut self.ram, 60);
                 self.hardware = *hw;
             }
             Event::Log { message, .. } => {
@@ -276,7 +383,7 @@ impl App {
                 }
                 self.logs
                     .push_back(format!("{} {}", local_clock(), sanitize(&message)));
-                self.logs.truncate_front(1000);
+                RingLimit::truncate_front(&mut self.logs, 1000);
                 if self.view == View::Logs {
                     self.scroll = self.scroll.min(self.logs.len().saturating_sub(1));
                 }
@@ -291,6 +398,20 @@ impl App {
                 self.resize_pending = pending;
             }
         }
+    }
+    pub fn list_len(&self) -> usize {
+        match self.view {
+            View::Logs => self.logs.len(),
+            View::Policy => self
+                .supervisor
+                .as_ref()
+                .map_or(0, |s| s.resize_history.len()),
+            _ => self.metrics.data["requests"].as_array().map_or(0, Vec::len),
+        }
+    }
+    pub fn refresh_ages(&mut self) {
+        self.age_now = epoch();
+        self.age_updated = Instant::now();
     }
     pub fn stale(&self) -> bool {
         !self.demo && self.updated.is_some_and(|t| t.elapsed().as_secs() >= 4)
@@ -394,6 +515,32 @@ pub fn demo() -> App {
     ] {
         app.logs.push_back(message.into());
     }
+    use clap::Parser;
+    let args = crate::Args::parse_from(["strata-wrap", "iq3_s"]);
+    let mut state = crate::control::Snapshot::new(&args, 8080);
+    state.policy = app.policy.clone();
+    state.metrics = Some(app.metrics.clone());
+    state.hardware = Some(app.hardware.clone());
+    for i in 0..120 {
+        state
+            .memory_history
+            .push_back((1800 + ((i as f64 * 0.1).sin().abs() * 200.) as u64, 6144));
+    }
+    for (i, (before, after)) in [(7168, 6656), (6656, 6144)].into_iter().enumerate() {
+        state
+            .resize_history
+            .push_back(crate::control::ResizeRecord {
+                at: now - 180. + i as f64 * 60.,
+                direction: "shrink".into(),
+                target_free_mib: 1600,
+                before_mib: before,
+                after_mib: Some(after),
+                free_mib: Some(1600),
+                wait_seconds: 1.4,
+                result: "applied".into(),
+            });
+    }
+    app.supervisor = Some(Box::new(state));
     app
 }
 
@@ -454,5 +601,41 @@ mod tests {
         app.metrics.status["loaded"] = json!(false);
         assert_eq!(app.metrics.cache(), 0);
         assert_eq!(app.metrics.full_cache(), 0);
+    }
+    #[test]
+    fn parallel_totals_sum_active_slots_without_counting_held_idle_tokens() {
+        let mut m = Metrics {
+            status: json!({"activity":{"in_flight":2}}),
+            data: json!({
+            "totals":{"output_tokens":300,"prompt_tokens":4000,"decode_ms":10000},
+            "live":{"parallel":3,"outside_slots":0,"generated":9000,"tok_s_mean":100,"slots":[
+                {"state":"decoding","generated":100,"prompt_tokens":1000,"tok_s":50},
+                {"state":"reading","generated":0,"prompt_tokens":2000,"tok_s":null},
+                {"state":"idle","held_tokens":20000,"generated":9000,"prompt_tokens":99999}
+            ]}}),
+        };
+        assert_eq!(m.totals().input, 7000);
+        assert_eq!(m.totals().output, 400);
+        assert!((m.totals().tps - 400. / 12.).abs() < 0.001);
+        assert!(!m.totals().partial);
+        m.data["live"]["outside_slots"] = json!(1);
+        assert!(m.totals().partial);
+    }
+    #[test]
+    fn request_ages_only_refresh_on_entry_or_interval() {
+        let mut app = demo();
+        let metrics = app.metrics.clone();
+        app.age_now = 100.;
+        app.age_updated = Instant::now();
+        app.apply(Event::Metrics(metrics.clone()));
+        assert_eq!(app.age_now, 100.);
+        app.age_updated = Instant::now() - std::time::Duration::from_secs(31);
+        app.apply(Event::Metrics(metrics.clone()));
+        assert!(app.age_now > 100.);
+        app.age_now = 100.;
+        let mut next = metrics;
+        next.data["requests"][0]["time"] = json!(1.);
+        app.apply(Event::Metrics(next));
+        assert!(app.age_now > 100.);
     }
 }

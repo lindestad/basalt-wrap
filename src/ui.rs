@@ -155,6 +155,9 @@ impl Ui {
             if app.theme_picker.is_some() {
                 self.themes(f, app, area);
             }
+            if let Some(preview) = &app.reload_preview {
+                self.reload(f, preview, area);
+            }
             return;
         }
         let process =
@@ -180,6 +183,7 @@ impl Ui {
             View::Overview => self.overview(f, app, rows[4]),
             View::Requests => self.requests(f, app, rows[4], true),
             View::Logs => self.logs(f, app, rows[4]),
+            View::Policy => self.policy(f, app, rows[4]),
         }
         if process > 0 {
             self.processes(f, app, rows[5]);
@@ -190,7 +194,7 @@ impl Ui {
                 rows[6],
                 0,
                 Line::from(vec![
-                    self.dim(" 1/2/3 views  hjkl  p GPU  t theme  ?"),
+                    self.dim(" 1–4 views  hjkl  a ages  t theme  ?"),
                     value(
                         if app.stopping {
                             "  Stopping…"
@@ -217,9 +221,11 @@ impl Ui {
                     value("2", self.palette.accent),
                     self.dim(" Requests  "),
                     value("3", self.palette.accent),
-                    self.dim(" Logs"),
+                    self.dim(" Logs  "),
+                    value("4", self.palette.accent),
+                    self.dim(" Policy"),
                     self.dim(if area.width >= 94 {
-                        "   h/l views  j/k select  p GPU  t theme  ? help"
+                        "   hjkl  a ages  Space growth  c config  ?"
                     } else {
                         "   hjkl  t theme  ? help"
                     }),
@@ -227,7 +233,11 @@ impl Ui {
                         if app.stopping {
                             "   Stopping…"
                         } else {
-                            "   q quit"
+                            if app.attached {
+                                "   q detach"
+                            } else {
+                                "   q stop"
+                            }
                         },
                         if app.stopping {
                             self.palette.warning
@@ -243,6 +253,19 @@ impl Ui {
         }
         if app.theme_picker.is_some() {
             self.themes(f, app, area);
+        }
+        if let Some(preview) = &app.reload_preview {
+            self.reload(f, preview, area);
+        } else if let Some(notice) = &app.control_notice {
+            line(
+                f,
+                area,
+                area.height.saturating_sub(1),
+                Line::from(value(
+                    format!(" {notice} · Esc dismiss"),
+                    self.palette.warning,
+                )),
+            );
         }
     }
 
@@ -301,7 +324,13 @@ impl Ui {
                 self.dim(format!(
                     " {}{}",
                     app.address,
-                    if app.demo { "   PREVIEW" } else { "" }
+                    if app.demo {
+                        "   PREVIEW"
+                    } else if app.attached {
+                        "   ATTACHED · read-only"
+                    } else {
+                        ""
+                    }
                 )),
                 self.dim(format!(
                     "   {}",
@@ -361,19 +390,35 @@ impl Ui {
             ),
             (
                 "Session avg",
-                format!("{:.1} tok/s", total.tps),
-                format!("{} decoding", clock(total.decode_seconds)),
+                if total.partial {
+                    "— tok/s".into()
+                } else {
+                    format!("{:.1} tok/s", total.tps)
+                },
+                if number(&app.metrics.data, "/live/parallel") > 0. {
+                    "per-request decode mean".into()
+                } else {
+                    format!("{} decoding", clock(total.decode_seconds))
+                },
                 self.palette.secondary,
             ),
             (
                 "Input tokens",
-                commas(total.input),
+                format!(
+                    "{}{}",
+                    if total.partial { "≥" } else { "" },
+                    commas(total.input)
+                ),
                 format!("{} reused", compact(total.reused)),
                 self.palette.fg,
             ),
             (
                 "Output tokens",
-                commas(total.output),
+                format!(
+                    "{}{}",
+                    if total.partial { "≥" } else { "" },
+                    commas(total.output)
+                ),
                 format!("{} requests", total.requests),
                 self.palette.success,
             ),
@@ -715,7 +760,12 @@ impl Ui {
         };
         self.gauge(
             f,
-            inner,
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(2),
+                inner.width,
+                inner.height.saturating_sub(2),
+            ),
             used as u64,
             context,
             format!("Context {} / {}", compact(used as u64), compact(context)),
@@ -724,7 +774,7 @@ impl Ui {
         line(
             f,
             inner,
-            1,
+            3,
             Line::from(self.dim(format!(
                 "KV {} · {} resident",
                 text(data, "/engine/kv"),
@@ -734,7 +784,7 @@ impl Ui {
         if inner.height > 2 {
             self.gauge(
                 f,
-                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
                 m.cache(),
                 m.full_cache(),
                 format!(
@@ -748,7 +798,7 @@ impl Ui {
         line(
             f,
             inner,
-            3,
+            4,
             Line::from(self.dim(format!(
                 "{} expert slots · {} MiB steps",
                 commas(number(data, "/engine/expert_slots") as u64),
@@ -758,9 +808,21 @@ impl Ui {
         line(
             f,
             inner,
-            4,
+            0,
             Line::from(value(
-                app.policy.clone(),
+                app.supervisor.as_ref().map_or_else(
+                    || app.policy.clone(),
+                    |s| {
+                        format!(
+                            "{} · {}",
+                            match s.effective.growth_mode {
+                                crate::policy::GrowthMode::Idle => "idle",
+                                crate::policy::GrowthMode::Capacity => "capacity",
+                            },
+                            app.policy
+                        )
+                    },
+                ),
                 if app.resize_pending {
                     self.palette.warning
                 } else {
@@ -773,7 +835,7 @@ impl Ui {
             inner,
             5,
             Line::from(self.dim(format!(
-                "Reserve ≥{:.1} GiB · grow below {:.0} GiB",
+                "Reserve ≥{:.1} GiB · grow <{:.1} GiB",
                 app.min_free_mib as f64 / 1024.0,
                 app.grow_below_mib as f64 / 1024.0
             ))),
@@ -869,6 +931,178 @@ impl Ui {
         );
     }
 
+    fn policy(&self, f: &mut Frame, app: &App, area: Rect) {
+        let rows = split(
+            area,
+            [
+                Constraint::Length(if area.height >= 14 { 6 } else { 2 }),
+                Constraint::Min(1),
+            ],
+            Direction::Vertical,
+        );
+        if let Some(state) = &app.supervisor {
+            let graphs = split(
+                rows[0],
+                [Constraint::Percentage(50); 2],
+                Direction::Horizontal,
+            );
+            for (i, title) in [
+                "Free VRAM · MiB · recent samples",
+                "Expert cache · MiB · recent samples",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let inner = self.inside(f, graphs[i], title.to_string());
+                let data = state
+                    .memory_history
+                    .iter()
+                    .rev()
+                    .take(inner.width as usize)
+                    .map(|(free, cache)| if i == 0 { *free } else { *cache })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>();
+                f.render_widget(
+                    Sparkline::default()
+                        .data(&data)
+                        .max(data.iter().copied().max().unwrap_or(1).max(1))
+                        .style(style(if i == 0 {
+                            self.palette.accent
+                        } else {
+                            self.palette.secondary
+                        })),
+                    inner,
+                );
+            }
+            let records = state
+                .resize_history
+                .iter()
+                .rev()
+                .map(|r| {
+                    Row::new(vec![
+                        format!("{}m", ((app.age_now - r.at).max(0.) / 60.) as u64),
+                        r.direction.clone(),
+                        format!(
+                            "{} → {}",
+                            r.before_mib,
+                            r.after_mib.map_or_else(|| "…".into(), |n| n.to_string())
+                        ),
+                        r.free_mib.map_or_else(|| "—".into(), |n| n.to_string()),
+                        r.target_free_mib.to_string(),
+                        format!("{:.1}s", r.wait_seconds),
+                        r.result.clone(),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                records,
+                [
+                    Constraint::Length(5),
+                    Constraint::Length(6),
+                    Constraint::Length(16),
+                    Constraint::Length(7),
+                    Constraint::Length(7),
+                    Constraint::Length(7),
+                    Constraint::Min(10),
+                ],
+            )
+            .header(
+                Row::new([
+                    "Age",
+                    "Asked",
+                    "Cache MiB",
+                    "Free",
+                    "Target",
+                    "Wait",
+                    "Result",
+                ])
+                .style(style(self.palette.muted)),
+            )
+            .block(self.panel(format!(
+                "{} · {:?} · Space growth · r reconcile · c config",
+                state.policy, state.effective.growth_mode
+            )))
+            .row_highlight_style(Style::default().bg(self.palette.track));
+            let mut selected = TableState::default().with_selected(
+                (!state.resize_history.is_empty())
+                    .then_some(app.scroll.min(state.resize_history.len().saturating_sub(1))),
+            );
+            f.render_stateful_widget(table, rows[1], &mut selected);
+            if state.resize_history.is_empty() {
+                let inner = rows[1].inner(ratatui::layout::Margin::new(2, 2));
+                line(
+                    f,
+                    inner,
+                    0,
+                    Line::from(self.dim("No resize requests this session")),
+                );
+            }
+        } else {
+            let inner = self.inside(f, area, "VRAM policy");
+            line(
+                f,
+                inner,
+                0,
+                Line::from(value(app.policy.clone(), self.palette.accent)),
+            );
+            line(
+                f,
+                inner,
+                2,
+                Line::from(
+                    self.dim(
+                        "Worker history unavailable · restart an older wrapper when convenient",
+                    ),
+                ),
+            );
+        }
+    }
+
+    fn reload(&self, f: &mut Frame, preview: &serde_json::Value, area: Rect) {
+        let width = area.width.saturating_sub(2).min(90);
+        let height = area.height.saturating_sub(2).min(20);
+        let rect = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        f.render_widget(Clear, rect);
+        let inner = self.inside(f, rect, "Reload VRAM policy · Enter apply · Esc cancel");
+        let current = &preview["current"];
+        let proposed = &preview["proposed"];
+        let mut lines = vec![Line::from(
+            self.dim("Setting                     Running → Config"),
+        )];
+        for key in [
+            "enabled",
+            "growth_mode",
+            "min_free_mib",
+            "grow_below_mib",
+            "grow_delay_seconds",
+            "poll_seconds",
+            "step_mib",
+            "accounting_margin_mib",
+            "no_op_retry_seconds",
+        ] {
+            let changed = current[key] != proposed[key];
+            lines.push(Line::from(value(
+                format!("{key:<27} {} → {}", current[key], proposed[key]),
+                if changed {
+                    self.palette.accent
+                } else {
+                    self.palette.muted
+                },
+            )));
+        }
+        lines.push(Line::from(self.dim(
+            "VRAM settings only. Growth timer restarts. GPU/model require restart.",
+        )));
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
     fn requests(&self, f: &mut Frame, app: &App, area: Rect, detail: bool) {
         let rows = if detail && area.height >= 12 {
             split(
@@ -899,10 +1133,7 @@ impl Ui {
         } else {
             vec!["Age", "Input", "Output", "tok/s", "Result"]
         };
-        let latest = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
+        let latest = app.age_now;
         let records = requests
             .iter()
             .map(|r| {
@@ -912,7 +1143,12 @@ impl Ui {
                 } else {
                     self.palette.success
                 };
-                let age = clock((latest - number(r, "/time")).max(0.));
+                let elapsed = (latest - number(r, "/time")).max(0.);
+                let age = if app.age_seconds {
+                    clock(elapsed)
+                } else {
+                    format!("{}m", elapsed as u64 / 60)
+                };
                 let mut cells = vec![
                     Cell::from(age).style(style(self.palette.muted)),
                     Cell::from(compact(number(r, "/prompt_tokens") as u64)),
@@ -964,9 +1200,9 @@ impl Ui {
         let table = Table::new(records, widths)
             .header(Row::new(header).style(style(self.palette.muted)).height(1))
             .block(self.panel(if detail {
-                "Request history · j/k select"
+                "Request history · j/k select · a ages"
             } else {
-                "Recent requests · Enter details"
+                "Recent requests · Enter details · a ages"
             }))
             .column_spacing(1)
             .row_highlight_style(Style::default().bg(self.palette.track))
@@ -1163,6 +1399,7 @@ impl Ui {
         let lines = vec![
             Line::from(value(" STRATA", self.palette.accent)),
             Line::from(app.model.clone()),
+            Line::from(value(app.policy.clone(), self.palette.accent)),
             Line::from(format!(
                 "Session {:.1} tok/s · {} output",
                 t.tps,
@@ -1174,7 +1411,11 @@ impl Ui {
                 gib(app.hardware.ram_used)
             )),
             Line::from(self.dim("Resize to 50×14 for the dashboard")),
-            Line::from(self.dim("t theme · q quit · ? help")),
+            Line::from(self.dim(if app.attached {
+                "t theme · q detach · ? help"
+            } else {
+                "t theme · q stop · ? help"
+            })),
         ];
         f.render_widget(Paragraph::new(lines), area);
     }
@@ -1269,9 +1510,11 @@ impl Ui {
         f.render_widget(Clear, rect);
         let inner = self.inside(f, rect, "Strata · keyboard & metrics");
         let lines = [
-            "1 / 2 / 3 / Tab    Overview / request history / logs",
+            "1 / 2 / 3 / 4 / Tab   Overview / requests / logs / policy",
+            "Space / r / c      Pause growth / reconcile / preview VRAM reload",
             "h / l / ← →        Previous / next view",
             "j / k / ↓ ↑        Select requests or scroll logs",
+            "a                 Toggle request ages: minutes / seconds",
             "Ctrl+D / Ctrl+U    Half-page down / up",
             "Ctrl+F / Ctrl+B    Page down / up (also PageDown / PageUp)",
             "gg / G             First / last request; oldest / newest log",
@@ -1280,7 +1523,9 @@ impl Ui {
             "b                   Open Strata's web dashboard",
             "t                   Themes · hjkl preview · Enter apply · Esc cancel",
             "? / Esc             Close this help",
-            if app.demo {
+            if app.attached {
+                "q / Ctrl+C          Detach; keep the server running"
+            } else if app.demo {
                 "q / Ctrl+C          Close this preview"
             } else {
                 "q / Ctrl+C          Stop Strata and exit (again to force)"
@@ -1411,7 +1656,7 @@ mod tests {
     fn monochrome_has_no_colored_cells_in_any_view_or_overlay() {
         let mut app = crate::model::demo();
         app.theme = crate::theme::Theme::Monochrome;
-        for view in [View::Overview, View::Requests, View::Logs] {
+        for view in [View::Overview, View::Requests, View::Logs, View::Policy] {
             app.view = view;
             for overlay in 0..3 {
                 app.help = overlay == 1;
@@ -1441,7 +1686,7 @@ mod tests {
         let mut app = crate::model::demo();
         for theme in crate::theme::Theme::ALL {
             app.theme = theme;
-            for view in [View::Overview, View::Requests, View::Logs] {
+            for view in [View::Overview, View::Requests, View::Logs, View::Policy] {
                 app.view = view;
                 for w in [0, 20, 49, 50, 60, 80, 100, 140] {
                     for h in [0, 5, 13, 14, 20, 23, 24, 32, 45, 60] {
@@ -1499,5 +1744,32 @@ mod tests {
         ] {
             assert!(text.contains(label), "missing {label}");
         }
+    }
+    #[test]
+    fn policy_remains_visible_in_small_layout_and_history_fills_tall_panels() {
+        let mut app = crate::model::demo();
+        app.policy = "Growing in 42s · spare VRAM".into();
+        assert!(
+            snapshot(&app, 60, 20, false)
+                .unwrap()
+                .contains("Growing in 42s")
+        );
+        let row = app.metrics.data["requests"][0].clone();
+        app.metrics.data["requests"] = json!((0..50).map(|_| row.clone()).collect::<Vec<_>>());
+        app.view = View::Requests;
+        let text = snapshot(&app, 100, 55, false).unwrap();
+        assert!(text.matches("42.7").count() > 12);
+        app.view = View::Policy;
+        let text = snapshot(&app, 120, 40, false).unwrap();
+        assert!(
+            text.contains("Free VRAM") && text.contains("7168 → 6656") && text.contains("applied")
+        );
+        app.view = View::Requests;
+        app.age_now = crate::control::epoch();
+        let minutes = snapshot(&app, 100, 35, false).unwrap();
+        assert!(!minutes.contains("0m 32s"));
+        app.age_seconds = true;
+        let seconds = snapshot(&app, 100, 35, false).unwrap();
+        assert!(seconds.contains("0m 32s"));
     }
 }

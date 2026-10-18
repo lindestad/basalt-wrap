@@ -185,13 +185,26 @@ pub fn load(path: &Path) -> Result<Theme> {
 }
 
 pub fn save(path: &Path, theme: Theme) -> Result<()> {
+    save_profile(path, theme, None)
+}
+
+pub fn save_profile(path: &Path, theme: Theme, profile: Option<&str>) -> Result<()> {
     let mut data = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
         Err(e) => return Err(e.into()),
     };
     anyhow::ensure!(data.is_object(), "preferences must be a JSON object");
-    data["theme"] = serde_json::to_value(theme)?;
+    if let Some(name) = profile {
+        let target = data
+            .get_mut("profiles")
+            .and_then(|p| p.get_mut(name))
+            .context("selected profile no longer exists")?;
+        anyhow::ensure!(target.is_object(), "profile must be an object");
+        target["theme"] = serde_json::to_value(theme)?;
+    } else {
+        data["theme"] = serde_json::to_value(theme)?;
+    }
     let parent = path.parent().context("preferences need a directory")?;
     std::fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".preferences-{}.tmp", std::process::id()));
@@ -233,5 +246,18 @@ mod tests {
         assert!(load(&path).is_err());
         assert!(save(&path, Theme::Ember).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "broken");
+    }
+    #[test]
+    fn profile_theme_updates_only_that_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path,r#"{"theme":"nord","profiles":{"ud":{"theme":"ember","model":"ud-iq3_s"},"regular":{"theme":"dracula"}},"vram":{"step_mib":512}}"#).unwrap();
+        save_profile(&path, Theme::Monochrome, Some("ud")).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["profiles"]["ud"]["theme"], "monochrome");
+        assert_eq!(value["theme"], "nord");
+        assert_eq!(value["profiles"]["regular"]["theme"], "dracula");
+        assert_eq!(value["vram"]["step_mib"], 512);
     }
 }

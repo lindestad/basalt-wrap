@@ -89,6 +89,7 @@ pub struct Hardware {
 pub struct Collector {
     nvml: Option<Nvml>,
     gpu: u32,
+    pub external: bool,
     cpu_prev: (u64, u64),
     disk_prev: (u64, u64),
     last: Instant,
@@ -101,6 +102,7 @@ impl Collector {
         Self {
             nvml: Nvml::init().ok(),
             gpu,
+            external: false,
             cpu_prev: cpu_times(),
             disk_prev: disk_bytes(),
             last: Instant::now(),
@@ -139,7 +141,7 @@ impl Collector {
         hw.disk_write = disk.1.saturating_sub(self.disk_prev.1) as f64 / elapsed / 1048576.0;
         self.disk_prev = disk;
 
-        let cgroup = cgroup_dir();
+        let cgroup = if self.external { None } else { cgroup_dir() };
         let pids = cgroup
             .as_ref()
             .and_then(|p| fs::read_to_string(p.join("cgroup.procs")).ok())

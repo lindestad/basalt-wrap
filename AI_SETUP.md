@@ -31,7 +31,9 @@ peer expert caches, AMD, Windows, or macOS as supported by this wrapper.
 Find the Strata checkout and the model JSON files. Confirm that
 `<checkout>/.venv/bin/python` and `<checkout>/serve/server.py` exist. Check for an
 already running server or `strata-wrap.service` before attempting to start one.
-Use `--preview` for UI checks while a user's session is running.
+Use `--preview` for UI checks while a user's session is running, or `--attach`
+for a read-only dashboard of the existing worker/server. Quitting an attachment
+must leave the server running.
 
 ## Install the wrapper
 
@@ -95,6 +97,15 @@ Displayed GiB values are rounded, while policy decisions use MiB.
 strata-wrap --init-config
 ```
 
+For an existing checkout/model, `strata-wrap /path/to/model.json --strata-dir
+/path/to/Strata --setup` creates a starter config using the selected GPU UUID.
+It refuses to overwrite files and leaves model JSON and shell bindings alone.
+Run `--doctor` afterward. Setup does not install Strata or enable elastic mode.
+
+```sh
+strata-wrap /path/to/model.json --doctor
+```
+
 This creates `$XDG_CONFIG_HOME/strata-wrap/config.json`, or
 `~/.config/strata-wrap/config.json`. It refuses to overwrite an existing file.
 Edit that file, preserving existing values. Use `--config PATH` for another
@@ -123,6 +134,8 @@ The complete config schema has these fields:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| `age_seconds` | `false` | Show seconds in request ages; `a` toggles this for the current dashboard |
+| `profiles` | `{}` | Named setting overrides; select with `--profile NAME` |
 | `schema_version` | `1` | Config format version |
 | `strata_dir` | `null` | Strata checkout; defaults to `~/apps/Strata` |
 | `model` | `null` | Default model name or model JSON path |
@@ -152,6 +165,7 @@ Do not put the API key in the wrapper config or forward it on the command line.
 ```sh
 strata-wrap --check-config
 strata-wrap --preview
+strata-wrap /path/to/model.json --doctor
 strata-wrap /path/to/model.json --strata-dir /path/to/Strata
 ```
 
@@ -163,9 +177,22 @@ server is already running under the wrapper, leave it running and use:
 strata-wrap /path/to/model.json --diagnose
 ```
 
-This makes read-only requests to the running server. It reports blockers and
-memory counters without printing request content or the key. It cannot inspect
-another worker's elapsed timer; use the TUI for its countdown and pending state.
+For a current worker, this reads its private status socket and reports the
+settings actually running, policy state, pending resize, history, and telemetry
+age. No request content or key is printed. Older wrappers lack that socket;
+the fallback is clearly labeled as server counters plus current file settings.
+Do not describe those settings as the old worker's effective policy.
+
+The Policy view (`4`) shows resize results and memory graphs. Space pauses
+only growth, keeping pressure shrinking enabled. `r` reconciles fresh engine
+and GPU state before resuming after an error; it refuses while a resize is
+pending. `c` previews VRAM settings from disk before Enter applies them. Reload
+replaces startup policy overrides and resets growth timing; GPU/model/port/unit
+changes still require a new launch. An attachment cannot use these controls.
+
+Named profiles inherit root settings and override individual VRAM fields.
+Use `--list-profiles` to inspect names and `--profile NAME --doctor` before
+starting a profile. A theme chosen in a profile is saved to that profile.
 
 After startup, send a small request through the user's existing client and
 check token output. Verify normal shutdown when convenient for the user:
@@ -183,7 +210,7 @@ an engine running.
 1. Confirm which executable is running and which config it loaded. Startup
    logs show GPU selection and the effective VRAM policy. A running worker
    keeps the settings it received at launch; editing a file takes effect on
-   the next launch.
+   the next launch unless its VRAM settings are previewed and reloaded.
 2. Use `--diagnose` and the TUI. Growth can be blocked by the usage threshold,
    reserve, full cache, active inference in idle mode, or interrupted telemetry.
 3. Inspect wrapper resize lines under `~/.local/state/strata-wrap/` (or

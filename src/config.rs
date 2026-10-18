@@ -23,6 +23,8 @@ impl std::fmt::Display for Gpu {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub schema_version: u32,
+    pub age_seconds: bool,
+    pub profiles: std::collections::BTreeMap<String, serde_json::Value>,
     pub strata_dir: Option<PathBuf>,
     pub model: Option<String>,
     pub port: Option<u16>,
@@ -35,6 +37,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             schema_version: 1,
+            age_seconds: false,
+            profiles: Default::default(),
             strata_dir: None,
             model: None,
             port: None,
@@ -84,61 +88,111 @@ pub fn default_path() -> PathBuf {
 }
 
 pub fn load(path: &Path, required: bool) -> Result<Settings> {
+    load_selected(path, required, None)
+}
+
+fn merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
+    if let (Some(base), Some(overlay)) = (base.as_object_mut(), overlay.as_object()) {
+        for (key, value) in overlay {
+            if key == "vram" {
+                merge(
+                    base.entry(key).or_insert_with(|| serde_json::json!({})),
+                    value,
+                );
+            } else {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+pub fn load_selected(path: &Path, required: bool, profile: Option<&str>) -> Result<Settings> {
     match std::fs::read(path) {
         Ok(bytes) => {
-            let settings: Settings = serde_json::from_slice(&bytes)
+            let mut raw: serde_json::Value = serde_json::from_slice(&bytes)
                 .with_context(|| format!("parse wrapper config {}", path.display()))?;
-            ensure!(
-                settings.model.as_deref() != Some("install"),
-                "the default model cannot be the install command"
-            );
-            ensure!(
-                settings.schema_version == 1,
-                "unsupported wrapper config schema_version {}",
-                settings.schema_version
-            );
-            ensure!(
-                settings.vram.min_free_mib != Some(0) && settings.vram.grow_below_mib != Some(0),
-                "VRAM thresholds must be positive or null for automatic sizing"
-            );
-            let v = &settings.vram;
-            ensure!(
-                v.grow_delay_seconds.is_finite()
-                    && (0.0..=86400.).contains(&v.grow_delay_seconds)
-                    && v.poll_seconds.is_finite()
-                    && (0.2..=60.).contains(&v.poll_seconds)
-                    && (64..=65536).contains(&v.step_mib)
-                    && v.accounting_margin_mib <= 4096
-                    && v.no_op_retry_seconds.is_finite()
-                    && (1.0..=86400.).contains(&v.no_op_retry_seconds),
-                "invalid VRAM thresholds or polling interval in wrapper config"
-            );
-            ensure!(settings.port != Some(0), "port must be between 1 and 65535");
-            ensure!(
-                !settings.unit.is_empty()
-                    && settings
-                        .unit
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
-                "invalid systemd unit name in wrapper config"
-            );
-            if let Some(gpu) = &settings.gpu {
-                let selector = gpu.to_string();
-                ensure!(
-                    selector.parse::<u32>().is_ok()
-                        || (selector.starts_with("GPU-")
-                            && !selector.chars().any(char::is_whitespace)),
-                    "GPU must be an NVIDIA index or GPU UUID"
-                );
+            if let Some(profiles) = raw.get("profiles").and_then(serde_json::Value::as_object) {
+                for (name, value) in profiles {
+                    ensure!(
+                        value.is_object() && value.get("profiles").is_none(),
+                        "profile {name} must be an object without nested profiles"
+                    );
+                    let profile: Settings = serde_json::from_value(value.clone())
+                        .with_context(|| format!("profile {name}"))?;
+                    validate(&profile).with_context(|| format!("profile {name}"))?;
+                }
             }
+            if let Some(name) = profile {
+                let overlay = raw
+                    .pointer("/profiles")
+                    .and_then(|p| p.get(name))
+                    .with_context(|| format!("unknown profile {name}"))?
+                    .clone();
+                merge(&mut raw, &overlay);
+            }
+            let settings: Settings = serde_json::from_value(raw)
+                .with_context(|| format!("parse wrapper config {}", path.display()))?;
+            validate(&settings)?;
             Ok(settings)
         }
-        Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+        Err(e) if !required && profile.is_none() && e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(Settings::default())
+        }
         Err(e) => Err(e).with_context(|| format!("read wrapper config {}", path.display())),
     }
 }
 
+fn validate(settings: &Settings) -> Result<()> {
+    ensure!(
+        settings.model.as_deref() != Some("install"),
+        "the default model cannot be the install command"
+    );
+    ensure!(
+        settings.schema_version == 1,
+        "unsupported wrapper config schema_version {}",
+        settings.schema_version
+    );
+    ensure!(
+        settings.vram.min_free_mib != Some(0) && settings.vram.grow_below_mib != Some(0),
+        "VRAM thresholds must be positive or null for automatic sizing"
+    );
+    let v = &settings.vram;
+    ensure!(
+        v.grow_delay_seconds.is_finite()
+            && (0.0..=86400.).contains(&v.grow_delay_seconds)
+            && v.poll_seconds.is_finite()
+            && (0.2..=60.).contains(&v.poll_seconds)
+            && (64..=65536).contains(&v.step_mib)
+            && v.accounting_margin_mib <= 4096
+            && v.no_op_retry_seconds.is_finite()
+            && (1.0..=86400.).contains(&v.no_op_retry_seconds),
+        "invalid VRAM thresholds or polling interval in wrapper config"
+    );
+    ensure!(settings.port != Some(0), "port must be between 1 and 65535");
+    ensure!(
+        !settings.unit.is_empty()
+            && settings
+                .unit
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+        "invalid systemd unit name in wrapper config"
+    );
+    if let Some(gpu) = &settings.gpu {
+        let selector = gpu.to_string();
+        ensure!(
+            selector.parse::<u32>().is_ok()
+                || (selector.starts_with("GPU-") && !selector.chars().any(char::is_whitespace)),
+            "GPU must be an NVIDIA index or GPU UUID"
+        );
+    }
+    Ok(())
+}
+
 pub fn initialize(path: &Path) -> Result<()> {
+    initialize_with(path, &Settings::default())
+}
+
+pub fn initialize_with(path: &Path, settings: &Settings) -> Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(path.parent().context("config needs a directory")?)?;
     let mut file = std::fs::OpenOptions::new()
@@ -151,11 +205,7 @@ pub fn initialize(path: &Path) -> Result<()> {
                 path.display()
             )
         })?;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string_pretty(&Settings::default())?
-    )?;
+    writeln!(file, "{}", serde_json::to_string_pretty(settings)?)?;
     println!("Created {}", path.display());
     Ok(())
 }
@@ -175,10 +225,14 @@ pub fn apply(args: &mut Args, matches: &ArgMatches) -> Result<()> {
     args.settings_path = path.clone();
     args.auto_min_free = matches.value_source("min_free_mib") != Some(ValueSource::CommandLine);
     args.auto_grow_below = matches.value_source("grow_below_mib") != Some(ValueSource::CommandLine);
-    if args.worker || args.no_config || args.init_config {
+    if args.worker || args.no_config || args.init_config || args.setup {
         return Ok(());
     }
-    let settings = load(&path, args.wrapper_config.is_some())?;
+    let settings = load_selected(
+        &path,
+        args.wrapper_config.is_some(),
+        args.profile.as_deref(),
+    )?;
     let from_cli = |name: &str| matches.value_source(name) == Some(ValueSource::CommandLine);
     let parent = path.parent().unwrap_or(Path::new("."));
     if !from_cli("strata_dir")
@@ -199,6 +253,9 @@ pub fn apply(args: &mut Args, matches: &ArgMatches) -> Result<()> {
     }
     if args.port.is_none() {
         args.port = settings.port;
+    }
+    if !from_cli("age_seconds") {
+        args.age_seconds = settings.age_seconds;
     }
     if !from_cli("unit") {
         args.unit = settings.unit;
@@ -305,6 +362,50 @@ pub fn resolve_model(args: &mut Args, model: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_model(args: &Args, model: &serde_json::Value) -> Result<()> {
+    if let Some(port) = model.get("port") {
+        ensure!(
+            port.as_u64().is_some_and(|p| (1..=65535).contains(&p)),
+            "model port must be an integer between 1 and 65535"
+        );
+    }
+    if !args.no_vram_management {
+        ensure!(
+            model["vram_elastic"] == true,
+            "enable vram_elastic in {}",
+            args.config().display()
+        );
+        let segment = model["vram_segment_mib"].as_u64().unwrap_or(512);
+        ensure!(
+            segment >= 64 && args.step_mib.is_multiple_of(segment),
+            "step_mib must be a multiple of the model's vram_segment_mib ({segment})"
+        );
+    }
+    Ok(())
+}
+
+pub fn reload_policy(args: &Args) -> Result<crate::control::Effective> {
+    ensure!(!args.no_config, "reload unavailable with --no-config");
+    let v = load_selected(&args.settings_path, true, args.profile.as_deref())?.vram;
+    let mut updated = args.clone();
+    updated.auto_min_free = v.min_free_mib.is_none();
+    updated.auto_grow_below = v.grow_below_mib.is_none();
+    updated.min_free_mib = v.min_free_mib.unwrap_or(1024);
+    updated.grow_below_mib = v.grow_below_mib.unwrap_or(14336);
+    updated.grow_delay = v.grow_delay_seconds;
+    updated.poll = v.poll_seconds;
+    updated.growth_mode = v.growth_mode;
+    updated.step_mib = v.step_mib;
+    updated.accounting_margin_mib = v.accounting_margin_mib;
+    updated.no_op_retry = v.no_op_retry_seconds;
+    updated.no_vram_management = !v.enabled;
+    let model = crate::runtime::read_config(args)?;
+    resolve_model(&mut updated, &model)?;
+    validate_model(&updated, &model)?;
+    updated.validate()?;
+    Ok(crate::control::Effective::new(&updated))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +480,49 @@ mod tests {
         assert_eq!(load(&path, true).unwrap().schema_version, 1);
         std::fs::write(&path, r#"{"vram":{"grow_dealy_seconds":2}}"#).unwrap();
         assert!(load(&path, true).is_err());
+    }
+    #[test]
+    fn profiles_inherit_policy_and_cli_still_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path,r#"{"vram":{"min_free_mib":1536,"step_mib":256},"profiles":{"desktop":{"model":"model.json","vram":{"growth_mode":"capacity"}}}}"#).unwrap();
+        let matches = Args::command()
+            .try_get_matches_from([
+                "strata-wrap",
+                "--config",
+                path.to_str().unwrap(),
+                "--profile",
+                "desktop",
+                "--step-mib",
+                "512",
+            ])
+            .unwrap();
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        apply(&mut args, &matches).unwrap();
+        assert_eq!(args.step_mib, 512);
+        assert_eq!(args.min_free_mib, 1536);
+        assert_eq!(args.growth_mode, GrowthMode::Capacity);
+        assert_eq!(
+            args.model.as_deref(),
+            dir.path().join("model.json").to_str()
+        );
+        assert!(load_selected(&path, true, Some("missing")).is_err());
+    }
+    #[test]
+    fn setup_can_create_an_explicit_new_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new/config.json");
+        let matches = Args::command()
+            .try_get_matches_from([
+                "strata-wrap",
+                "iq3_s",
+                "--setup",
+                "--config",
+                path.to_str().unwrap(),
+            ])
+            .unwrap();
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        apply(&mut args, &matches).unwrap();
+        assert_eq!(args.settings_path, path);
     }
 }

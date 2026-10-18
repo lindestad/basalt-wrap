@@ -106,6 +106,14 @@ impl Fixture {
         let until = Instant::now() + Duration::from_secs(25);
         while Instant::now() < until {
             if self.child.try_wait().unwrap().is_some() && !self.pids.iter().any(|pid| live(*pid)) {
+                let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| format!("/run/user/{}", unsafe { libc::getuid() }).into());
+                let _ = fs::remove_file(
+                    runtime
+                        .join("strata-wrap")
+                        .join(format!("{}.service.sock", self.unit)),
+                );
                 return;
             }
             thread::sleep(Duration::from_millis(100));
@@ -157,6 +165,48 @@ fn lifecycle_cleanup_and_console() {
         };
         f.clean();
         assert!(!f.child.wait().unwrap().success());
+    }
+    {
+        let mut f = Fixture::new("attach");
+        let broken = f.temp.path().join("broken.json");
+        fs::write(&broken, "broken").unwrap();
+        let diagnosis = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+            .args(["--diagnose", "--unit", &f.unit, "--config"])
+            .arg(&broken)
+            .output()
+            .unwrap();
+        assert!(
+            diagnosis.status.success(),
+            "{}",
+            String::from_utf8_lossy(&diagnosis.stderr)
+        );
+        let status: Value = serde_json::from_slice(&diagnosis.stdout).unwrap();
+        assert_eq!(status["source"], "running-worker");
+        assert_eq!(status["effective"]["step_mib"], 512);
+        let mut attached = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+            .args(["--attach", "--unit", &f.unit, "--plain", "--no-config"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        thread::sleep(Duration::from_millis(200));
+        unsafe {
+            libc::kill(attached.id() as i32, libc::SIGINT);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while attached.try_wait().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            attached.try_wait().unwrap().is_some(),
+            "attachment did not exit"
+        );
+        assert!(
+            f.pids.iter().all(|pid| live(*pid)),
+            "detaching stopped the owned server"
+        );
+        f.signal(libc::SIGINT);
+        f.clean();
     }
     {
         let mut f = Fixture::new("duplicate");
