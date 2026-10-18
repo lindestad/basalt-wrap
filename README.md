@@ -2,7 +2,7 @@
 
 A Rust / Ratatui dashboard for Strata, with model supervision and automatic VRAM management.
 
-![Overview](docs/overview.png)
+<img src="docs/overview.png" alt="Strata dashboard with the default theme, showing inference speed, memory, request history, and GPU processes" width="1000">
 
 Install from crates.io:
 
@@ -79,6 +79,8 @@ on the dashboard. Move with `hjkl`, arrow keys, or Tab. Enter saves the selectio
 for future launches; Esc restores the previous palette. This also works while
 the model is generating.
 
+<img src="docs/themes.png" alt="Six theme previews: Ember, Monochrome, Ayu Dark, Rosé Pine, Everforest, and Solarized Light" width="1000">
+
 | Theme | Appearance |
 | --- | --- |
 | `strata` | Midnight blue with sea glass and lavender |
@@ -92,8 +94,6 @@ the model is generating.
 | `ayu-dark` | Ink black with amber and sky blue |
 | `rose-pine` | Dusk violet with rose and iris |
 | `everforest` | Forest charcoal with sage and sea green |
-
-![Theme gallery](docs/themes.png)
 
 ```sh
 strata-wrap iq3_s --theme ember         # Override the saved theme for this launch
