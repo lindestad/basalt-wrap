@@ -4,6 +4,13 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Strata inference console and elastic VRAM supervisor"
+license = "MIT"
+repository = "https://github.com/lindestad/strata-wrap"
+homepage = "https://github.com/lindestad/strata-wrap"
+readme = "README.md"
+keywords = ["strata", "llm", "tui", "vram", "inference"]
+categories = ["command-line-utilities"]
+include = ["src/**", "tests/**", "docs/*.png", "README.md", "LICENSE", "Cargo.toml", "Cargo.lock"]
 
 [dependencies]
 anyhow = "1"

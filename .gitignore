@@ -1,1 +1,6 @@
 target/
+.env
+.env.*
+*.log
+strata-*.json
+preferences.json

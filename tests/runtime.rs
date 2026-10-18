@@ -251,4 +251,13 @@ fn installer_preserves_local_settings() {
     assert!(fish.contains("set keep untouched"));
     assert!(fish.contains("strata-wrap ud-iq3_s"));
     assert!(home.join(".local/bin/strata-wrap").is_symlink());
+    assert_eq!(
+        fs::read_link(home.join(".local/bin/strata-wrap")).unwrap(),
+        Path::new(exe)
+    );
+    let output = Command::new(home.join(".local/bin/strata-wrap"))
+        .arg("--list-themes")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
 }

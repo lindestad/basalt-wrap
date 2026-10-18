@@ -4,16 +4,33 @@ A Rust / Ratatui dashboard for Strata, with model supervision and automatic VRAM
 
 ![Overview](docs/overview.png)
 
+Install from crates.io:
+
 ```sh
-cargo build --release --locked
-./strata-wrap install
+cargo install strata-wrap --locked
+strata-wrap --preview
+strata-wrap /path/to/model.json --strata-dir /path/to/Strata
+```
+
+Strata must already be installed with its server environment at `.venv` inside
+its checkout. The default checkout is `~/apps/Strata`; use `--strata-dir` for
+another location. Requirements: Linux, Rust 1.88+, a systemd user manager, and
+one NVIDIA GPU with its driver installed. The wrapper itself is entirely Rust.
+
+For the existing `iq3_s` and `ud-iq3_s` configs under `~/apps/Strata`:
+
+```sh
 strata-wrap iq3_s
 strata-wrap ud-iq3_s
 ```
 
-The installer enables elastic mode in both existing model configs, installs the launcher under `~/.local/bin`, and connects the Fish abbreviations `sa` and `saud`. It backs up changed files under `~/.local/state/strata-wrap/backups`. Reload an existing shell with `source ~/.config/fish/.config.local.fish`.
-
-The wrapper and its installer are entirely Rust. Strata runs through its own existing environment at `~/apps/Strata/.venv`. Requirements: Linux, Rust 1.88+, a systemd user manager, and one NVIDIA GPU with its driver installed.
+The optional `strata-wrap install` helper enables elastic mode in both of those
+configs, links the executable under `~/.local/bin`, and updates existing Fish
+abbreviations `sa` and `saud` in `~/.config/fish/.config.local.fish`. It expects
+both configs and abbreviations to exist. It backs up changed files under
+`~/.local/state/strata-wrap/backups`. Reload an existing shell with
+`source ~/.config/fish/.config.local.fish`. For other setups, use a model JSON
+path and enable elastic mode in that config.
 
 ## Dashboard
 
@@ -128,6 +145,8 @@ Shutdown sends SIGTERM to Strata for its normal cleanup. An unresponsive server 
 ## Development
 
 ```sh
+cargo build --release --locked
+./strata-wrap --preview
 cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 cargo fmt --check
@@ -135,3 +154,21 @@ cargo build --release --locked
 ```
 
 Tests cover weighted session throughput, navigation, scrolling, resize timing, no-op handling, all palettes and overlays at small terminal sizes, grayscale output, theme selection and persistence, preview isolation, and the process-panel height limit. Integration tests use the real systemd user manager and a Rust HTTP fixture whose child escapes into a new session and ignores SIGTERM. They exercise interrupt, hangup, termination, launcher and worker SIGKILL, service stop, server crashes, duplicate launches, and installation. The ignored `fixture_process` test is the child fixture entry point, not a skipped check. Integration tests use port 18089 and remove their transient services afterward.
+
+## Releases
+
+CI checks formatting, Clippy, tests, crate packaging, and Rust 1.88 compatibility.
+The Linux runner starts a systemd user manager for the lifecycle tests; it does
+not need an NVIDIA GPU.
+
+Version tags such as `v0.2.0` verify the matching Cargo version, publish to
+crates.io through GitHub OIDC Trusted Publishing, and attach a Linux x86_64
+binary to a GitHub release. The crates.io publisher is restricted to
+`lindestad/strata-wrap`, `.github/workflows/release.yml`, and the `crates-io`
+environment. The first crate version is published manually before configuring
+Trusted Publishing. A release skips crate upload when that version is already
+published, so the bootstrap release can still build its binary.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

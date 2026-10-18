@@ -10,12 +10,12 @@ use std::{
 pub fn run() -> Result<()> {
     let home = home();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let launcher = root.join("strata-wrap");
+    let legacy_launcher = root.join("strata-wrap");
+    let launcher = runtime::executable()?;
     let link = home.join(".local/bin/strata-wrap");
     if fs::symlink_metadata(&link).is_ok()
         && (!link.is_symlink()
-            || !fs::read_link(&link)
-                .is_ok_and(|v| v == launcher || v == runtime::executable().unwrap_or_default()))
+            || !fs::read_link(&link).is_ok_and(|v| v == launcher || v == legacy_launcher))
     {
         bail!(
             "{} already exists and points somewhere else",
@@ -65,9 +65,10 @@ pub fn run() -> Result<()> {
         fs::write(&path, data)?;
     }
     fs::create_dir_all(link.parent().context("missing launcher directory")?)?;
-    if !link.is_symlink() {
-        symlink(launcher, &link)?;
+    if link.is_symlink() {
+        fs::remove_file(&link)?;
     }
+    symlink(launcher, &link)?;
     println!("Installed Rust launcher at {}", link.display());
     println!(
         "Elastic mode enabled for both models; sa and saud updated. Backups: {}",
