@@ -28,6 +28,8 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo publish --dry-run --locked
+      - name: Remove generated package sources before caching
+        run: cargo clean --target-dir target/package
 
   msrv:
     runs-on: ubuntu-latest

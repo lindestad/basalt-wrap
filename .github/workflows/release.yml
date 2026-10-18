@@ -28,6 +28,8 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - run: cargo test --locked
       - run: cargo publish --dry-run --locked
+      - name: Remove generated package sources before caching
+        run: cargo clean --target-dir target/package
 
   build:
     needs: verify
