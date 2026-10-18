@@ -1,4 +1,4 @@
-use crate::model::{App, View, number, text};
+use crate::model::{App, View, number, prefill_rate, text};
 use anyhow::Result;
 use ratatui::{
     Frame, Terminal,
@@ -322,18 +322,41 @@ impl Ui {
 
     fn stats(&self, f: &mut Frame, app: &App, area: Rect) {
         let total = app.metrics.totals();
-        let live = text(&app.metrics.data, "/live/state") == "generating";
-        let rate = if live {
-            number(&app.metrics.data, "/live/tok_s")
-        } else {
-            number(app.metrics.last(), "/decode_tok_s")
+        let state = text(&app.metrics.data, "/live/state");
+        let (title, rate, subtitle) = match state {
+            "reading" => (
+                "Prefill",
+                app.metrics
+                    .data
+                    .pointer("/live/prefill_tok_s_mean")
+                    .and_then(serde_json::Value::as_f64),
+                "live prompt",
+            ),
+            "generating" => (
+                "Decode",
+                app.metrics
+                    .data
+                    .pointer("/live/tok_s")
+                    .and_then(serde_json::Value::as_f64),
+                "live output",
+            ),
+            _ => (
+                "Decode",
+                app.metrics
+                    .last()
+                    .get("decode_tok_s")
+                    .and_then(serde_json::Value::as_f64),
+                "last request",
+            ),
         };
         let areas = split(area, [Constraint::Percentage(25); 4], Direction::Horizontal);
         let cards = [
             (
-                "Decode",
-                format!("{rate:.1} tok/s"),
-                if live { "live output" } else { "last request" }.to_string(),
+                title,
+                rate.filter(|r| r.is_finite() && *r >= 0.)
+                    .map(|r| format!("{r:.1} tok/s"))
+                    .unwrap_or_else(|| "— tok/s".into()),
+                subtitle.to_string(),
                 self.palette.accent,
             ),
             (
@@ -442,7 +465,9 @@ impl Ui {
             left,
             hw.gpu_used,
             hw.gpu_total,
-            if left.width < 44 {
+            if hw.gpu_total == 0 {
+                "VRAM unavailable".into()
+            } else if left.width < 44 {
                 format!(
                     "VRAM {}/{}G · {}G free",
                     gib(hw.gpu_used),
@@ -534,9 +559,11 @@ impl Ui {
                     error.clone()
                 } else {
                     format!(
-                        "Strata {} GiB   ·   other / driver {} GiB",
+                        "Strata {}G · other {}G · {} {}G",
                         gib(owned),
-                        gib(hw.gpu_used.saturating_sub(owned))
+                        gib(hw.gpu_allocated().saturating_sub(owned)),
+                        if left.width < 44 { "res" } else { "reserved" },
+                        gib(hw.gpu_reserved)
                     )
                 })),
             );
@@ -549,7 +576,7 @@ impl Ui {
             hw.ram_total,
             if right.width < 44 {
                 format!(
-                    "RAM {}/{}G · {}G free",
+                    "RAM {}/{}G · {}G avail",
                     gib(hw.ram_used),
                     gib(hw.ram_total),
                     gib(hw.ram_available)
@@ -775,21 +802,14 @@ impl Ui {
             Line::from(vec![
                 self.dim("Prefill "),
                 value(
-                    format!(
-                        "{:.0} tok/s",
-                        if active {
-                            number(data, "/live/prefill_tok_s_mean")
-                        } else {
-                            let ms = number(last, "/prompt_ms");
-                            if ms > 0. {
-                                (number(last, "/prompt_tokens") - number(last, "/reused")).max(0.)
-                                    * 1000.
-                                    / ms
-                            } else {
-                                0.
-                            }
-                        }
-                    ),
+                    (if active {
+                        data.pointer("/live/prefill_tok_s_mean")
+                            .and_then(serde_json::Value::as_f64)
+                    } else {
+                        prefill_rate(last)
+                    })
+                    .map(|r| format!("{r:.0} tok/s"))
+                    .unwrap_or_else(|| "— tok/s".into()),
                     self.palette.fg,
                 ),
             ]),
@@ -901,16 +921,11 @@ impl Ui {
                 }
                 cells.push(Cell::from(compact(number(r, "/output_tokens") as u64)));
                 if wide {
-                    let ms = number(r, "/prompt_ms");
-                    cells.push(Cell::from(if ms > 0. {
-                        format!(
-                            "{:.0}",
-                            (number(r, "/prompt_tokens") - number(r, "/reused")).max(0.) * 1000.
-                                / ms
-                        )
-                    } else {
-                        "—".into()
-                    }));
+                    cells.push(Cell::from(
+                        prefill_rate(r)
+                            .map(|rate| format!("{rate:.0}"))
+                            .unwrap_or_else(|| "—".into()),
+                    ));
                 }
                 cells.push(
                     Cell::from(format!("{:.1}", number(r, "/decode_tok_s")))
@@ -1276,6 +1291,7 @@ impl Ui {
             "Model PSS shares shared pages proportionally across processes.",
             "Locked memory is part of model memory, not an extra allocation.",
             "GPU processes include graphics and compute, deduplicated by PID.",
+            "Driver-reserved memory counts as used VRAM.",
             "VRAM resizing waits behind inference; the reserve is best effort.",
         ];
         f.render_widget(
@@ -1338,6 +1354,49 @@ fn rgb(color: Color, fallback: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_card_switches_prefill_decode_and_last_request_without_stale_rates() {
+        let mut app = crate::model::demo();
+        app.metrics.data["live"]["state"] = json!("reading");
+        app.metrics.data["live"]["prefill_tok_s_mean"] = json!(1234.5);
+        let top = |app: &App| {
+            snapshot(app, 100, 32, false)
+                .unwrap()
+                .lines()
+                .take(6)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let prefill = top(&app);
+        assert!(prefill.contains("Prefill") && prefill.contains("1234.5 tok/s"));
+        assert!(prefill.contains("live prompt") && !prefill.contains("44.8 tok/s"));
+        app.metrics.data["live"]["prefill_tok_s_mean"] = serde_json::Value::Null;
+        assert!(top(&app).contains("— tok/s"));
+        app.metrics.data["live"]["state"] = json!("generating");
+        let decode = top(&app);
+        assert!(decode.contains("Decode") && decode.contains("44.8 tok/s"));
+        assert!(!decode.contains("Prefill"));
+        app.metrics.data["live"]["state"] = json!("idle");
+        let idle = top(&app);
+        assert!(idle.contains("42.7 tok/s") && idle.contains("last request"));
+    }
+
+    #[test]
+    fn vram_label_and_breakdown_include_driver_reservation() {
+        let mut app = crate::model::demo();
+        app.hardware.gpu_total = 17_094_934_528;
+        app.hardware.gpu_free = 1_725_890_560;
+        app.hardware.gpu_used = app.hardware.gpu_total - app.hardware.gpu_free;
+        app.hardware.gpu_reserved = 411_369_472;
+        for width in [100, 140] {
+            let text = snapshot(&app, width, 44, false).unwrap();
+            assert!(text.contains("VRAM 14.3 / 15.9 GiB   1.6 free"));
+            assert!(text.contains("reserved 0.4G"));
+            assert!(text.contains("other 2.9G"));
+        }
+        let text = snapshot(&app, 80, 32, false).unwrap();
+        assert!(text.contains("VRAM 14.3/15.9G · 1.6G free"));
+    }
     #[test]
     fn monochrome_has_no_colored_cells_in_any_view_or_overlay() {
         let mut app = crate::model::demo();

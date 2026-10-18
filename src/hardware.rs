@@ -27,6 +27,8 @@ pub struct Hardware {
     pub gpu_total: u64,
     pub gpu_used: u64,
     pub gpu_free: u64,
+    #[serde(default)]
+    pub gpu_reserved: u64,
     pub gpu_util: Option<u32>,
     pub gpu_temp: Option<u32>,
     pub gpu_power: Option<f64>,
@@ -172,9 +174,7 @@ impl Collector {
         hw.gpu_name = device.name().unwrap_or_default();
         match device.memory_info() {
             Ok(mem) => {
-                hw.gpu_total = mem.total;
-                hw.gpu_free = mem.free;
-                hw.gpu_used = mem.used;
+                hw.set_gpu_memory(mem.total, mem.free, mem.reserved);
             }
             Err(error) => {
                 hw.gpu_error = Some(error.to_string());
@@ -302,6 +302,19 @@ pub fn cgroup_dir() -> Option<PathBuf> {
 }
 
 impl Hardware {
+    fn set_gpu_memory(&mut self, total: u64, free: u64, reserved: u64) {
+        self.gpu_total = total;
+        self.gpu_free = free;
+        // NVML v2 separates driver-reserved bytes from allocations. Use the
+        // non-free total for both the bar and the policy's usage threshold.
+        self.gpu_used = total.saturating_sub(free);
+        self.gpu_reserved = reserved;
+    }
+
+    pub fn gpu_allocated(&self) -> u64 {
+        self.gpu_used.saturating_sub(self.gpu_reserved)
+    }
+
     pub fn demo() -> Self {
         let gb = 1u64 << 30;
         Self {
@@ -309,6 +322,7 @@ impl Hardware {
             gpu_total: 16 * gb,
             gpu_used: 14 * gb + gb / 4,
             gpu_free: gb + gb * 3 / 4,
+            gpu_reserved: 384 << 20,
             gpu_util: Some(87),
             gpu_temp: Some(62),
             gpu_power: Some(241.8),
@@ -372,5 +386,43 @@ impl Hardware {
             ],
             ..Self::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_nvml_sample_accounts_for_reserved_memory() {
+        // Captured from the affected GPU in one nvmlDeviceGetMemoryInfo_v2 call.
+        let mut hw = Hardware::default();
+        hw.set_gpu_memory(17_094_934_528, 1_725_890_560, 411_369_472);
+        assert_eq!(hw.gpu_used, 15_369_043_968);
+        assert_eq!(hw.gpu_allocated(), 14_957_674_496);
+        assert_eq!(hw.gpu_used + hw.gpu_free, hw.gpu_total);
+        assert_eq!(
+            hw.gpu_allocated() + hw.gpu_reserved + hw.gpu_free,
+            hw.gpu_total
+        );
+        let mut policy = crate::policy::Policy::new(1024, 14336, 60., 2.);
+        for now in [0., 60., 120.] {
+            assert!(
+                policy
+                    .observe(
+                        now,
+                        crate::policy::Sample {
+                            used: hw.gpu_used >> 20,
+                            free: hw.gpu_free >> 20,
+                            cache: 6000,
+                            full: 8000,
+                            activity: "1".into(),
+                            busy: false,
+                        }
+                    )
+                    .is_none()
+            );
+        }
+        assert!(policy.quiet_since.is_none());
     }
 }

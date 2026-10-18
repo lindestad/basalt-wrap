@@ -20,6 +20,21 @@ pub fn truth(value: &Value, path: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn prefill_rate(request: &Value) -> Option<f64> {
+    let ms = number(request, "/prompt_ms");
+    if ms <= 0.0 {
+        return None;
+    }
+    // New engines report the tokens actually read, including partial reads and
+    // prefix copies. Older engines only expose prompt and reused counts.
+    let read = request
+        .get("prompt_read")
+        .and_then(Value::as_f64)
+        .filter(|v| v.is_finite())
+        .unwrap_or_else(|| number(request, "/prompt_tokens") - number(request, "/reused"));
+    Some(read.max(0.0) * 1000.0 / ms)
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Metrics {
     pub data: Value,
@@ -383,6 +398,19 @@ pub fn demo() -> App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prefill_uses_actual_read_tokens_with_older_engine_fallback() {
+        let mut request =
+            json!({"prompt_tokens":10000,"reused":1000,"prompt_read":2000,"prompt_ms":500.0});
+        assert_eq!(prefill_rate(&request), Some(4000.0));
+        request["prompt_read"] = Value::Null;
+        assert_eq!(prefill_rate(&request), Some(18000.0));
+        request["prompt_ms"] = json!(0);
+        assert_eq!(prefill_rate(&request), None);
+        request["prompt_ms"] = json!(500);
+        request["reused"] = json!(20000);
+        assert_eq!(prefill_rate(&request), Some(0.0));
+    }
     #[test]
     fn weighted_decode_rate_ignores_idle_and_prefill() {
         let mut m = Metrics {
