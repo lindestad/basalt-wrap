@@ -17,6 +17,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
       - name: Start systemd user manager for lifecycle tests
         shell: bash
         run: |
@@ -28,8 +30,8 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo publish --dry-run --locked
-      - name: Remove generated package sources before caching
-        run: cargo clean --target-dir target/package
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/crate-check
 
   msrv:
     runs-on: ubuntu-latest
