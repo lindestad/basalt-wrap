@@ -1,5 +1,8 @@
-#!/usr/bin/env python3
-from strata_wrap.app import main
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+if [[ ! -x "$root/target/release/strata-wrap" ]]; then
+    echo "Build the Rust wrapper first: cargo build --release --manifest-path $root/Cargo.toml" >&2
+    exit 1
+fi
+exec "$root/target/release/strata-wrap" "$@"

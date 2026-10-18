@@ -1,0 +1,26 @@
+[package]
+name = "strata-wrap"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Strata inference console and elastic VRAM supervisor"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+libc = "0.2"
+nvml-wrapper = { version = "0.13", features = ["legacy-functions"] }
+ratatui = "0.30.2"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+signal-hook = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tiny_http = "0.12"
+
+[profile.release]
+lto = "thin"
+strip = true

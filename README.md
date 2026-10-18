@@ -1,55 +1,91 @@
 # strata-wrap
 
-Run one Strata model with a compact terminal console and automatic expert-cache resizing. Python 3.10+, Linux with a systemd user manager, and one NVIDIA GPU are required. There are no Python dependencies.
+A Rust / Ratatui dashboard for Strata, with model supervision and automatic VRAM management.
+
+![Overview](docs/overview.png)
 
 ```sh
-python3 install.py
+cargo build --release --locked
+./strata-wrap install
 strata-wrap iq3_s
 strata-wrap ud-iq3_s
-strata-wrap /path/to/model.json
 ```
 
-The installer enables `vram_elastic` with 512 MiB segments in the existing regular and UD configs under `~/apps/Strata`, creates `~/.local/bin/strata-wrap`, and redirects the Fish abbreviations `sa` and `saud`. It backs up the changed files under `~/.local/state/strata-wrap/backups`. Existing API keys, model arguments, and pricing stay in their local JSON files.
+The installer enables elastic mode in both existing model configs, installs the launcher under `~/.local/bin`, and connects the Fish abbreviations `sa` and `saud`. It backs up changed files under `~/.local/state/strata-wrap/backups`. Reload an existing shell with `source ~/.config/fish/.config.local.fish`.
 
-The console shows model loading, prompt progress, output tokens and speed, per-request timings, cache reuse, and MTP acceptance. When output is redirected, it prints completed request summaries without terminal escape sequences. `--raw` also displays unfiltered server output. Raw server output and resize events are always saved under `~/.local/state/strata-wrap/`, rotating at 8 MiB with three backups per model. Strata also keeps its native engine log at the path in its model config.
+The wrapper and its installer are entirely Rust. Strata runs through its own existing environment at `~/apps/Strata/.venv`. Requirements: Linux, Rust 1.88+, a systemd user manager, and one NVIDIA GPU with its driver installed.
+
+## Dashboard
+
+- Live decode speed, prompt progress, elapsed time, and queued requests.
+- Session input and output tokens, prompt reuse, and average output speed. The session average is **total output tokens / active decode seconds**. Idle time and prompt processing are excluded. In-flight output is included using Strata's reported mean decode rate.
+- GPU utilization, temperature, power, VRAM, PCIe traffic, CPU use, disk throughput, RAM, and swap.
+- Model memory from the service's processes: proportional resident memory (PSS), anonymous/file/shared pages, locked memory, and total memory charged to the service group. Locked memory is part of resident memory; service-group accounting also includes charged file cache. These measurements overlap and should not be added together.
+- Context occupancy, KV configuration, expert-cache size, resize state, MTP acceptance, and conversation-cache occupancy, restores, and evictions.
+- Request history with prefill/decode rates, cache reuse, expert hits, duration, and completion reason. Select a request for its timing and token details.
+- A scrolling log that retains its position when new output arrives.
+
+GPU processes include both compute and graphics workloads, sorted by VRAM usage and deduplicated by PID. The panel occupies at most one quarter of terminal height and disappears when that space cannot fit a header and three entries. Press `p` to scroll through processes beyond the visible rows. Missing driver counters are reported as unavailable. GPU readings use NVML directly.
+
+## Keys
+
+| Keys | Action |
+| --- | --- |
+| `h` / `l`, left / right | Previous / next view |
+| `1` / `2` / `3`, Tab | Overview / requests / logs |
+| `j` / `k`, down / up | Select requests or scroll logs / focused GPU processes |
+| `gg` / `G`, Home / End | First / last request; oldest / newest logs |
+| Ctrl+U / Ctrl+D | Half-page up / down |
+| Ctrl+B / Ctrl+F, PageUp / PageDown | Page up / down |
+| Enter | Open the selected request's details |
+| `p` / Esc | Focus GPU processes / return |
+| `b` | Open Strata's web dashboard |
+| `?` / Esc | Open / close help |
+| `q`, Ctrl+C | Stop Strata and exit; repeat to force |
+
+The layout adapts to terminal size, with a compact summary below 50 columns or 14 rows. `NO_COLOR` is respected. Redirected output uses plain summaries automatically; `--plain` selects those explicitly and `--raw` includes unfiltered server output in plain mode.
+
+```sh
+strata-wrap --demo                      # Preview without starting a model
+strata-wrap /path/to/model.json         # Another elastic Strata config
+strata-wrap iq3_s --plain
+strata-wrap iq3_s -- --idle-unload 120   # Forward Strata server options after --
+```
+
+The server stays on loopback, with the API key read from its model config. The existing web dashboard remains available on port 8080; `--port` changes both the listener and monitoring address. Logs rotate at 8 MiB with three backups under `~/.local/state/strata-wrap/`. Strata's native engine log remains at the path in its config.
 
 ## VRAM policy
 
-- Poll GPU memory every two seconds. Below 1,024 MiB free, request a 512 MiB cache reduction. Once the response confirms a reduction, wait two seconds before another shrink.
-- Grow by 512 MiB only after total GPU usage stays below 14,336 MiB for 60 seconds with no inference. A resize, new inference, missing monitoring data, or usage reaching that threshold resets the timer. Each growth step requires a fresh quiet period.
-- Never request growth that would leave less than 1,024 MiB free. The initial full cache is the growth limit; only the expert cache can be resized.
-- Allow only one resize request at a time. A successful HTTP response counts as progress only if the returned cache size changed in the requested direction. After a no-op, retry that direction only when the cache size, inference activity, or available memory changes substantially.
-- An HTTP timeout or server error leaves the resize outcome uncertain, so management pauses until the wrapper restarts. Engine refusal also pauses management. Inference continues.
+Every two seconds, the supervisor checks total GPU memory use. Below 1,024 MiB free, it requests another 512 MiB cache reduction. A confirmed reduction allows another shrink after the cooldown. A no-op suppresses that direction until available memory, cache size, or inference activity changes meaningfully.
 
-Strata accepts a target amount of free memory rather than an exact cache delta. The wrapper adds or subtracts 512 MiB from the sampled free memory to calculate that target. Growth includes a 16 MiB accounting margin: NVIDIA's reported free memory can exceed CUDA's by a small amount, leaving less than a whole segment available. Concurrent allocations and segment rounding can change the actual result. A shrink can wait behind inference; the free-memory target is best effort, not an allocation guarantee. The wrapper does not unload the model to reclaim its fixed allocations.
+Growth requires GPU usage below 14,336 MiB and no inference for 60 continuous seconds. Each growth step needs a fresh quiet period. New inference, a resize, missing telemetry, or crossing the usage threshold resets that timer. Growth preserves at least 1,024 MiB free and stops at the engine's initial full cache size.
 
-Defaults can be changed per launch:
+Strata's endpoint takes a free-memory target rather than a cache delta. Targets include a 16 MiB accounting margin in both directions because NVML and CUDA can disagree slightly. Concurrent allocations and segment rounding can change the actual result. Only one resize may be outstanding; responses must confirm a cache-size change. A failed or uncertain resize pauses management until restart. The server keeps serving inference.
+
+A shrink may wait behind an inference request, and only the expert cache can shrink. The reserve is best effort; this cannot guarantee room for a sudden allocation burst.
 
 ```sh
 strata-wrap iq3_s --min-free-mib 1024 --grow-below-mib 14336 \
     --grow-delay 60 --poll 2
 ```
 
-Other Strata server options can follow the model name. `--port` changes both the listener and monitoring address. The wrapper fixes the host to loopback and reads the API key from the model config. It does not proxy inference traffic or alter the model's public name.
+## Shutdown
 
-## Process lifetime
-
-Each launch creates the transient user service `strata-wrap.service`. It starts on demand, with no automatic restart or boot activation. A second launch is refused while it is running. Use a different `--unit` and port for a separate instance.
-
-Ctrl+C, SIGTERM, SIGHUP, or the command below initiates shutdown:
+Every launch owns a transient `strata-wrap.service` user service. It starts on demand, without a restart loop or boot activation. Duplicate launches are refused. A port lock also prevents separate wrapper units from managing the same server.
 
 ```sh
 systemctl --user stop strata-wrap
 ```
 
-The wrapper sends SIGTERM to the Strata server, which takes its normal shutdown path. After 12 seconds the wrapper kills an unresponsive server. systemd contains the wrapper and all descendants in one cgroup, including children that create new process groups or sessions. Its `KillMode=mixed` and 20-second stop timeout remove remaining children when the service ends. There is no restart loop that can bring the model back after stopping it.
+Shutdown sends SIGTERM to Strata for its normal cleanup. An unresponsive server is killed after 12 seconds. systemd's `KillMode=mixed` and 20-second stop timeout contain and clean up all descendants, including children that create separate process groups or sessions. Killing the service's main wrapper also cleans up the engine. The worker watches the foreground launcher's pidfd, so killing that launcher triggers shutdown too. Terminal state is restored on normal exit, errors, handled signals, and panics.
 
-The foreground launcher remains alive while the service runs. The worker watches a Linux pidfd for that launcher, so even SIGKILL of the foreground command triggers cleanup. Killing the service's main wrapper also triggers systemd cleanup. This containment requires launching through `strata-wrap`; `--worker` is an internal entry point.
-
-## Checks
+## Development
 
 ```sh
-python3 -m unittest discover -s tests -v
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo fmt --check
+cargo build --release --locked
 ```
 
-The runtime tests use a fake server that starts a child in a separate session and ignores SIGTERM. They exercise Ctrl+C, hangup, service stop, wrapper and launcher SIGKILL, unexpected server death, and duplicate launches against the real systemd user manager. They use port 18089 and temporary units and clean up afterward.
+Tests cover weighted session throughput, navigation, scrolling, resize timing, no-op handling, small-terminal rendering, and the process-panel height limit. Integration tests use the real systemd user manager and a Rust HTTP fixture whose child escapes into a new session and ignores SIGTERM. They exercise interrupt, hangup, termination, launcher and worker SIGKILL, service stop, server crashes, duplicate launches, and installation. The ignored `fixture_process` test is the child fixture entry point, not a skipped check. Integration tests use port 18089 and remove their transient services afterward.
