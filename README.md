@@ -17,7 +17,7 @@ For Daniel's current machine, a private `local.json` and `local-model.json` are 
 ./basalt-wrap --config local.json
 ```
 
-The model config copies the tested IQ3_S settings and enables `engine.vram-elastic` with 512 MiB segments. The wrapper reserves 1152 MiB, grows below 13952 MiB used, and waits 60 seconds of spare capacity before growing. This allows it to lend VRAM to other applications between requests. These files are ignored by Git. The source benchmark config is unchanged.
+The model config copies the tested IQ3_S settings and enables `engine.vram-elastic` with 512 MiB segments. The wrapper targets 1152 MiB free, grows below 13952 MiB used, and waits 60 seconds of spare capacity before growing. This allows it to lend VRAM to other applications between requests. These files are ignored by Git. The source benchmark config is unchanged.
 
 ## Model configuration
 
@@ -117,7 +117,9 @@ Settings default to `~/.config/basalt-wrap/config.json`, respecting `XDG_CONFIG_
 
 Profiles inherit global settings; their VRAM fields override only the fields supplied. Select one with `--profile quiet`. `--setup MODEL --config FILE` creates settings for an existing checkout/model and detected GPU without overwriting files.
 
-Automatic thresholds reserve at least 1 GiB, or 1/16 of GPU memory, with another 1 GiB of hysteresis. `capacity` growth waits for sustained spare VRAM; `idle` also waits for inference to stop. Shrinking reacts to pressure in either mode. The engine applies resizes between requests. A busy engine defers the resize; uncertain errors pause management until reconciliation.
+Automatic thresholds target at least 1 GiB free, or 1/16 of GPU memory, with another 1 GiB of hysteresis. `capacity` growth waits for sustained spare VRAM; `idle` also waits for inference to stop. Shrinking reacts to pressure in either mode. The engine applies resizes between requests. A busy engine defers the resize; uncertain errors pause management until reconciliation.
+
+Basalt treats a reserve request as a sizing target. Actual free VRAM can remain below the requested reserve after a resize. The dashboard shows measured free VRAM and the desired reserve separately; check measured free VRAM before starting another GPU workload.
 
 Themes: `basalt` (the inherited midnight palette), `ember`, `monochrome`, `nord`, `dracula`, `gruvbox`, `catppuccin`, `solarized-light`, `ayu-dark`, `rose-pine`, and `everforest`. `--theme` overrides saved preferences for one launch.
 
