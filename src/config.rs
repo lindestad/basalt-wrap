@@ -404,9 +404,15 @@ pub fn validate_model(args: &Args, model: &serde_json::Value) -> Result<()> {
     ensure!(
         object
             .keys()
-            .all(|k| matches!(k.as_str(), "server" | "engine")),
-        "Basalt model config must contain only server and engine blocks"
+            .all(|k| matches!(k.as_str(), "server" | "engine" | "pricing")),
+        "Basalt model config must contain only server, engine, and optional pricing blocks"
     );
+    if let Some(pricing) = model.get("pricing") {
+        ensure!(
+            pricing.is_object() || pricing.is_null(),
+            "pricing must be an object or null"
+        );
+    }
     for section in ["server", "engine"] {
         if let Some(value) = model.get(section) {
             ensure!(value.is_object(), "{section} must be an object");
@@ -512,6 +518,36 @@ mod tests {
         }
         args.no_vram_management = true;
         validate_model(&args, &serde_json::json!({"engine":{}})).unwrap();
+    }
+
+    #[test]
+    fn pricing_metadata_accepts_objects_and_null_but_rejects_other_types() {
+        use clap::Parser;
+        let args = Args::parse_from(["basalt-wrap", "/tmp/model.json"]);
+        let mut model = serde_json::json!({"engine":{"vram-elastic":true}});
+        for pricing in [
+            serde_json::json!({"prompt":0.1,"completion":0.2}),
+            serde_json::json!({}),
+            serde_json::Value::Null,
+        ] {
+            model["pricing"] = pricing;
+            validate_model(&args, &model).unwrap();
+        }
+        for pricing in [
+            serde_json::json!("0.1"),
+            serde_json::json!(1),
+            serde_json::json!(true),
+            serde_json::json!([]),
+        ] {
+            model["pricing"] = pricing;
+            assert_eq!(
+                validate_model(&args, &model).unwrap_err().to_string(),
+                "pricing must be an object or null"
+            );
+        }
+        model["pricing"] = serde_json::Value::Null;
+        model["other_metadata"] = serde_json::json!({});
+        assert!(validate_model(&args, &model).is_err());
     }
 
     #[test]

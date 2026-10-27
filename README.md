@@ -41,6 +41,8 @@ The positional JSON is Basalt's model config. `--config` selects the wrapper's s
 }
 ```
 
+Daniel's Basalt pricing fork also accepts optional top-level `pricing` metadata (an object or `null`) and exposes its rates through `/models` and `/v1/models`. Basalt validates the rate fields.
+
 Relative model paths resolve from the model config's directory. Basalt accepts underscores in option names as well as hyphens. See [examples/model.json](examples/model.json) for the IQ3_S engine settings; replace its model path before running it.
 
 The wrapper launches `bin/basalt serve --config FILE`, forces loopback, and reads the listener port from `server.port`. `--basalt-dir`, `--gpu`, and `--port` override the corresponding selections. The GPU must be a single NVIDIA index or a UUID passed to the wrapper. Multiple engine GPUs are unsupported.
