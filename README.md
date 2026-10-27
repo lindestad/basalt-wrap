@@ -62,9 +62,9 @@ The shorthand `iq3_s` selects `~/apps/basalt/basalt-iq3_s.json`; `ud-iq3_s` sele
 
 ## Dashboard
 
-The overview shows prefill/decode speed, session tokens, GPU and system memory, context occupancy, expert-cache size, MTP acceptance, conversation-cache use, and GPU processes. Request history retains the server's entries, including cache reuse, timing, and completion reason. The policy view shows memory history and the last 100 resize attempts.
+The overview shows prefill/decode speed, session tokens, GPU and system memory, context occupancy, expert-cache size, MTP acceptance, the conversation-cache budget, and GPU processes. The request list holds what Basalt keeps: its 12 most recent finished requests, with cache reuse, timing, and completion reason. The policy view shows memory history and the last 100 resize attempts.
 
-Session output speed is total output tokens divided by active decode seconds. Idle and prefill time are excluded. Parallel slots contribute their individual active decode time. Incomplete slot accounting is marked in the UI.
+Session output speed is output tokens divided by active decode seconds. Idle and prefill time are excluded. Basalt reports a decode rate per request rather than a decode duration, and it keeps only the recent request list, so the wrapper sums tokens and seconds across polls: the totals cover everything it has seen, not one poll. Where the server has finished requests the wrapper never saw, which happens when attaching to a server already in use, the token counts carry a `≥` and the average shows `—`. Basalt's per-slot table (its `/slots` page) is not read, so the progress bar in the `Now` panel stays empty while a request runs.
 
 Hardware readings use NVML and Linux process accounting. The VRAM bar includes driver-reserved memory. Process PSS, locked memory, and service-group memory overlap and should not be added together. Unavailable counters remain unavailable.
 

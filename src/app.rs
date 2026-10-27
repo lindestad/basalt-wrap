@@ -632,10 +632,10 @@ pub fn attach(args: &Args) -> Result<i32> {
                 } else {
                     let api = api.as_ref().unwrap();
                     Ok(vec![
-                        Event::Metrics(model::Metrics {
-                            status: api.get("/v1/status")?,
-                            data: api.get("/metrics?requests=all")?,
-                        }),
+                        Event::Metrics(model::Metrics::new(
+                            api.get("/metrics")?,
+                            api.get("/v1/status")?,
+                        )),
                         Event::Hardware(Box::new(collector.sample())),
                     ])
                 }

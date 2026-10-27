@@ -42,13 +42,56 @@ pub fn prefill_rate(request: &Value) -> Option<f64> {
     Some(read.max(0.0) * 1000.0 / ms)
 }
 
+/// Active decode seconds of a finished request. Basalt reports the decode rate and the wall
+/// duration rather than a decode duration, so the rate gives the active part.
+pub fn decode_seconds(request: &Value) -> f64 {
+    let ms = number(request, "/decode_ms");
+    if ms > 0.0 {
+        return ms / 1000.;
+    }
+    let rate = number(request, "/decode_tok_s");
+    if rate > 0.0 {
+        number(request, "/output_tokens") / rate
+    } else {
+        0.0
+    }
+}
+
+/// Basalt names finished requests `r_NNNN`, counting from 1 for each server start. The number
+/// is what lets the wrapper tell a request it counted from one it never saw.
+pub fn request_number(request: &Value) -> Option<u64> {
+    request
+        .get("id")
+        .and_then(Value::as_str)
+        .and_then(|id| id.rsplit_once('_'))
+        .and_then(|(_, digits)| digits.parse().ok())
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Metrics {
     pub data: Value,
     pub status: Value,
+    /// What the wrapper has counted of this server's session. Basalt's `/metrics` lists only
+    /// its recent finished requests, so the session's sums ride along from poll to poll.
+    #[serde(default)]
+    pub session: Session,
 }
 
 impl Metrics {
+    pub fn new(data: Value, status: Value) -> Self {
+        Self {
+            data,
+            status,
+            session: Session::default(),
+        }
+    }
+
+    /// Carry the counts from the previous poll and add the finished requests of this one.
+    pub fn observe(&mut self, previous: &Session) {
+        self.session = previous.clone();
+        self.session.observe(&self.data, &self.status);
+    }
+
     pub fn busy(&self) -> bool {
         number(&self.status, "/activity/in_flight") > 0.0
             || matches!(text(&self.data, "/live/state"), "reading" | "generating")
@@ -83,32 +126,26 @@ impl Metrics {
     pub fn last(&self) -> &Value {
         self.data.pointer("/requests/0").unwrap_or(&Value::Null)
     }
+    /// Session totals. The finished part comes from the requests the wrapper has counted; the
+    /// live part adds the request in flight, whose active seconds the server's rate estimate
+    /// gives. Basalt's `/metrics` keeps only its recent requests, so a session longer than that
+    /// window is a floor: `partial` says so.
     pub fn totals(&self) -> Totals {
+        let session = self.session_counts();
         let active = self.busy();
-        let parallel = number(&self.data, "/live/parallel") > 0.;
-        let slots = self.data.pointer("/live/slots").and_then(Value::as_array);
-        let (generated, live_input, live_seconds) = if parallel {
-            slots
-                .into_iter()
-                .flatten()
-                .filter(|s| text(s, "/state") != "idle")
-                .fold((0., 0., 0.), |(out, input, seconds), slot| {
-                    let generated = number(slot, "/generated");
-                    let rate = number(slot, "/tok_s");
-                    (
-                        out + generated,
-                        input + number(slot, "/prompt_tokens"),
-                        seconds + if rate > 0. { generated / rate } else { 0. },
-                    )
-                })
-        } else if active {
+        let (generated, live_input, live_seconds) = if active {
             let generated = number(&self.data, "/live/generated");
             let mean = number(&self.data, "/live/tok_s_mean");
+            let rate = if mean > 0. {
+                mean
+            } else {
+                number(&self.data, "/live/tok_s")
+            };
             (
                 generated,
                 number(&self.data, "/live/prompt_tokens"),
-                if generated > 0. && mean > 0. {
-                    generated / mean
+                if generated > 0. && rate > 0. {
+                    generated / rate
                 } else {
                     0.
                 },
@@ -116,22 +153,91 @@ impl Metrics {
         } else {
             (0., 0., 0.)
         };
-        let output = number(&self.data, "/totals/output_tokens");
-        let seconds = number(&self.data, "/totals/decode_ms") / 1000.;
-        let rate_tokens = output + if live_seconds > 0.0 { generated } else { 0.0 };
+        // `/v1/status` counts the request in flight, and a queued one with it.
+        let finished = (number(&self.status, "/activity/requests")
+            - number(&self.status, "/activity/in_flight"))
+        .max(0.) as u64;
+        let gaps = if session.requests == 0 {
+            0
+        } else {
+            session.last - session.first + 1 - session.requests
+        };
+        let seconds = session.decode_seconds + live_seconds;
+        let rate_tokens = session.output as f64 + if live_seconds > 0.0 { generated } else { 0.0 };
         Totals {
-            partial: parallel
-                && (slots.is_none() || number(&self.data, "/live/outside_slots") > 0.),
-            input: number(&self.data, "/totals/prompt_tokens") as u64 + live_input as u64,
-            output: (output + generated) as u64,
-            reused: number(&self.data, "/totals/reused") as u64,
-            requests: number(&self.data, "/totals/requests") as u64,
-            decode_seconds: seconds + live_seconds,
-            tps: if seconds + live_seconds > 0.0 {
-                rate_tokens / (seconds + live_seconds)
+            partial: gaps > 0
+                || session.first > 1
+                || finished > session.last
+                || number(&self.data, "/live/slots/active") > 1.,
+            input: session.input + live_input as u64,
+            output: session.output + generated as u64,
+            reused: session.reused,
+            requests: session.requests.max(finished),
+            decode_seconds: seconds,
+            tps: if seconds > 0.0 {
+                rate_tokens / seconds
             } else {
                 0.0
             },
+        }
+    }
+
+    /// The session's sums including this poll. Counting is idempotent, so a poll already
+    /// counted adds nothing; a poll that never went through `observe` still accounts for
+    /// whatever the server's own list covers.
+    fn session_counts(&self) -> Session {
+        let mut session = self.session.clone();
+        session.observe(&self.data, &self.status);
+        session
+    }
+}
+
+/// One server's session as the wrapper has seen it. Basalt numbers finished requests from 1 at
+/// each start, so a gap in those numbers, or a server that reported more requests than the
+/// wrapper counted, means the sums are a floor.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Session {
+    /// `/started` of the server these counts belong to; a new server starts the counts over.
+    server: f64,
+    first: u64,
+    last: u64,
+    requests: u64,
+    input: u64,
+    output: u64,
+    reused: u64,
+    decode_seconds: f64,
+}
+
+impl Session {
+    pub fn observe(&mut self, data: &Value, status: &Value) {
+        let started = number(status, "/started");
+        if started > 0. && started != self.server {
+            *self = Self {
+                server: started,
+                ..Default::default()
+            };
+        }
+        let Some(rows) = data["requests"].as_array() else {
+            return;
+        };
+        let mut fresh: Vec<(u64, &Value)> = rows
+            .iter()
+            .filter_map(|row| Some((request_number(row)?, row)))
+            .filter(|(id, _)| *id > self.last)
+            .collect();
+        fresh.sort_by_key(|(id, _)| *id);
+        for (id, row) in fresh {
+            self.first = if self.first == 0 {
+                id
+            } else {
+                self.first.min(id)
+            };
+            self.last = self.last.max(id);
+            self.requests += 1;
+            self.input += number(row, "/prompt_tokens") as u64;
+            self.output += number(row, "/output_tokens") as u64;
+            self.reused += number(row, "/reused") as u64;
+            self.decode_seconds += decode_seconds(row);
         }
     }
 }
@@ -320,7 +426,8 @@ impl App {
                 self.resize_pending = snapshot.pending;
                 self.supervisor = Some(snapshot);
             }
-            Event::Metrics(metrics) => {
+            Event::Metrics(mut metrics) => {
+                metrics.observe(&self.metrics.session);
                 let new_entry = self.metrics.last()["time"] != metrics.last()["time"];
                 if new_entry
                     || self.age_updated.elapsed().as_secs() >= if self.age_seconds { 1 } else { 30 }
@@ -480,23 +587,22 @@ pub fn demo() -> App {
         .iter()
         .enumerate()
     {
-        requests.push(json!({"time":now-32.0-i as f64*72.0,"prompt_tokens":8640+i*912,"reused":6144,
-            "output_tokens":1128+i*134,"decode_tok_s":speed,"duration_s":32.4+i as f64*3.0,
-            "prompt_ms":2430.0,"decode_ms":26300.0,"hit_rate":0.684,"pcie_share":0.2,"finish":"stop",
-            "drafts_offered":1500,"drafts_accepted":1194}));
+        requests.push(json!({"id":format!("r_{:04}", 8 - i),"time":now-32.0-i as f64*72.0,
+            "prompt_tokens":8640+i*912,"reused":6144,"output_tokens":1128+i*134,"decode_tok_s":speed,
+            "duration_s":32.4+i as f64*3.0,"prompt_ms":2430.0,"hit_rate":0.684,"pcie_share":0.2,
+            "finish":"stop","drafts_offered":1500,"drafts_accepted":1194}));
     }
-    app.apply(Event::Metrics(Metrics { data: json!({"engine":{"model":app.model,"max_context":196608,
+    app.apply(Event::Metrics(Metrics::new(json!({"engine":{"model":app.model,"max_context":196608,
         "expert_cache_mib":6144,"expert_slots":3095,"kv":"k8v4","kv_resident":20480,
         "spec":4,"version":"0.1.44.1","conversation_cache_mib":12288,"conversation_cache_slots":4},
-        "live":{"state":"generating","phase":"decoding","prompt_tokens":18432,"generated":684,
-            "max_tokens":2048,"tok_s":44.8,"tok_s_mean":43.9,"elapsed_s":20.4,"queued":1,"prefill_tok_s_mean":3421.0},
-        "requests":requests,"totals":{"requests":24,"prompt_tokens":284912,"reused":196608,
-            "output_tokens":32768,"decode_ms":756911.0,"prompt_ms":48210.0},
-        "conversation_cache":{"enabled":true,"budget_mib":12288,"slots":4,"parked":3,"reused_tokens":196608},
+        "live":{"state":"generating","prompt_tokens":18432,"generated":684,
+            "tok_s":44.8,"elapsed_s":20.4,"queued":1,"prefill_tok_s_mean":3421.0,
+            "slots":{"total":2,"active":1,"queue_depth":1}},
+        "requests":requests,
         "hardware":{"gpu_pcie_rx_mb":4782.0,"gpu_pcie_gen":5,"gpu_pcie_width":16,"disk_read_mb":148.2,"disk_write_mb":4.6}}),
-        status: json!({"model":app.model,"loaded":true,"engine":"0.1.44.1","started":1780000000,
-            "activity":{"requests":25,"in_flight":2,"last_request_at":1780000360},
-            "vram":{"elastic":true,"expert_cache_mib":6144,"expert_cache_full_mib":7680,"expert_slots":3095}}) }));
+        json!({"model":app.model,"loaded":true,"engine":"0.1.44.1","started":1780000000,
+            "activity":{"requests":9,"in_flight":1,"last_request_at":1780000360},
+            "vram":{"elastic":true,"expert_cache_mib":6144,"expert_cache_full_mib":7680,"expert_slots":3095}}))));
     app.hardware = Hardware::demo();
     app.policy = "Holding · inference active".into();
     for i in 0..90 {
@@ -562,16 +668,16 @@ mod tests {
     }
     #[test]
     fn weighted_decode_rate_ignores_idle_and_prefill() {
-        let mut m = Metrics {
-            data: json!({"totals":{"prompt_tokens":4000,"output_tokens":300,"decode_ms":10000,"prompt_ms":90000},
-            "live":{"state":"idle"}}),
-            status: Value::Null,
-        };
+        let mut m = Metrics::new(
+            json!({"requests":[{"id":"r_0001","prompt_tokens":4000,"output_tokens":300,
+                "decode_tok_s":30.0,"prompt_ms":90000}],"live":{"state":"idle"}}),
+            json!({"started":1780000000,"activity":{"requests":1,"in_flight":0}}),
+        );
         assert_eq!(m.totals().tps, 30.0);
         m.data["live"]["elapsed_s"] = json!(1000000);
         assert_eq!(m.totals().tps, 30.0);
         m.data["live"] =
-            json!({"state":"generating","generated":100,"tok_s_mean":50,"prompt_tokens":1000});
+            json!({"state":"generating","generated":100,"tok_s":50,"prompt_tokens":1000});
         assert!((m.totals().tps - 400.0 / 12.0).abs() < 0.001);
         assert_eq!(m.totals().input, 5000);
         assert_eq!(m.totals().output, 400);
@@ -603,24 +709,73 @@ mod tests {
         assert_eq!(app.metrics.full_cache(), 0);
     }
     #[test]
-    fn parallel_totals_sum_active_slots_without_counting_held_idle_tokens() {
-        let mut m = Metrics {
-            status: json!({"activity":{"in_flight":2}}),
-            data: json!({
-            "totals":{"output_tokens":300,"prompt_tokens":4000,"decode_ms":10000},
-            "live":{"parallel":3,"outside_slots":0,"generated":9000,"tok_s_mean":100,"slots":[
-                {"state":"decoding","generated":100,"prompt_tokens":1000,"tok_s":50},
-                {"state":"reading","generated":0,"prompt_tokens":2000,"tok_s":null},
-                {"state":"idle","held_tokens":20000,"generated":9000,"prompt_tokens":99999}
-            ]}}),
-        };
-        assert_eq!(m.totals().input, 7000);
-        assert_eq!(m.totals().output, 400);
-        assert!((m.totals().tps - 400. / 12.).abs() < 0.001);
+    fn session_totals_span_polls_and_mark_what_was_never_seen() {
+        let mut m = Metrics::new(
+            json!({"requests":[
+                {"id":"r_0002","prompt_tokens":2000,"output_tokens":200,"decode_tok_s":40.0},
+                {"id":"r_0001","prompt_tokens":1000,"output_tokens":100,"decode_tok_s":20.0}],
+                "live":{"state":"idle"}}),
+            json!({"started":1780000000,"activity":{"requests":2,"in_flight":0}}),
+        );
+        assert_eq!(m.totals().requests, 2);
+        assert_eq!(m.totals().input, 3000);
+        assert_eq!(m.totals().output, 300);
+        // 100 tokens at 20 tok/s and 200 at 40 tok/s: ten active decode seconds.
+        assert!((m.totals().decode_seconds - 10.0).abs() < 0.001);
+        assert!((m.totals().tps - 30.0).abs() < 0.001);
         assert!(!m.totals().partial);
-        m.data["live"]["outside_slots"] = json!(1);
-        assert!(m.totals().partial);
+        let previous = m.session.clone();
+        m.observe(&previous);
+        assert_eq!(m.totals().requests, 2);
+        // A server that counted more than the wrapper's window shows as a floor.
+        let late = Metrics::new(
+            json!({"requests":[{"id":"r_0006","prompt_tokens":100,"output_tokens":50,
+                "decode_tok_s":25.0}],"live":{"state":"idle"}}),
+            json!({"started":1780000000,"activity":{"requests":6,"in_flight":0}}),
+        );
+        assert_eq!(late.totals().requests, 6);
+        assert!(late.totals().partial);
+        // The request numbers start over when the server does.
+        m.status = json!({"started":1780000999,"activity":{"requests":1,"in_flight":0}});
+        m.data["requests"] = json!([{"id":"r_0001","prompt_tokens":10,"output_tokens":10,
+            "decode_tok_s":10.0}]);
+        let previous = m.session.clone();
+        m.observe(&previous);
+        assert_eq!(m.totals().requests, 1);
+        assert_eq!(m.totals().output, 10);
+        assert!(!m.totals().partial);
     }
+    #[test]
+    fn basalt_rows_without_engine_timings_still_count_toward_the_session() {
+        // The shape Basalt answers with: no totals block, a slots summary rather than rows,
+        // and null timings when the engine has not reported them.
+        let rows: Vec<Value> = (1..=3)
+            .map(|i| {
+                json!({"id":format!("r_{i:04}"),"path":"/v1/chat/completions","slot":0,
+                    "time":1793098731.9,"duration_s":0.0,"finish":"length","prompt_tokens":246,
+                    "reused":null,"output_tokens":8,"prompt_ms":null,"decode_tok_s":null,
+                    "hit_rate":null,"pcie_share":null,"drafts_offered":null,
+                    "drafts_accepted":null,"ttft_s":0.0,"draft_len":null})
+            })
+            .rev()
+            .collect();
+        let m = Metrics::new(
+            json!({"requests":rows,"live":{"state":"idle","queued":0,
+                "slots":{"total":1,"active":0,"queue_depth":0},"queue":[],"prompt_tokens":null,
+                "generated":null,"elapsed_s":null,"tok_s":null,"prefill_tok_s_mean":null}}),
+            json!({"service":"basalt","loaded":true,"started":1793098687,
+                "activity":{"requests":3,"in_flight":0,"last_request_at":1793098731}}),
+        );
+        let totals = m.totals();
+        assert_eq!(totals.requests, 3);
+        assert_eq!(totals.input, 738);
+        assert_eq!(totals.output, 24);
+        // No decode rate here: the average stays empty instead of inventing one.
+        assert_eq!(totals.decode_seconds, 0.0);
+        assert_eq!(totals.tps, 0.0);
+        assert!(!totals.partial);
+    }
+
     #[test]
     fn request_ages_only_refresh_on_entry_or_interval() {
         let mut app = demo();

@@ -1,4 +1,4 @@
-use crate::model::{App, View, number, prefill_rate, text};
+use crate::model::{App, View, decode_seconds, number, prefill_rate, text};
 use anyhow::Result;
 use ratatui::{
     Frame, Terminal,
@@ -395,8 +395,12 @@ impl Ui {
                 } else {
                     format!("{:.1} tok/s", total.tps)
                 },
-                if number(&app.metrics.data, "/live/parallel") > 0. {
-                    "per-request decode mean".into()
+                if number(&app.metrics.data, "/live/slots/active") > 1. {
+                    format!(
+                        "{} decoding · {} slots",
+                        clock(total.decode_seconds),
+                        number(&app.metrics.data, "/live/slots/active") as u32
+                    )
                 } else {
                     format!("{} decoding", clock(total.decode_seconds))
                 },
@@ -419,7 +423,11 @@ impl Ui {
                     if total.partial { "≥" } else { "" },
                     commas(total.output)
                 ),
-                format!("{} requests", total.requests),
+                format!(
+                    "{}{} requests",
+                    if total.partial { "≥ " } else { "" },
+                    total.requests
+                ),
                 self.palette.success,
             ),
         ];
@@ -446,12 +454,22 @@ impl Ui {
         } else if !app.connected {
             app.loading_note.clone()
         } else if state == "reading" {
-            format!(
-                "Reading prompt  {} / {} tokens  ·  {:.1}s",
-                commas(number(data, "/live/prompt_read") as u64),
-                commas(number(data, "/live/prompt_total") as u64),
-                number(data, "/live/elapsed_s")
-            )
+            let total = number(data, "/live/prompt_total").max(number(data, "/live/prompt_tokens"));
+            let read = number(data, "/live/prompt_read");
+            if read > 0. {
+                format!(
+                    "Reading prompt  {} / {} tokens  ·  {:.1}s",
+                    commas(read as u64),
+                    commas(total as u64),
+                    number(data, "/live/elapsed_s")
+                )
+            } else {
+                format!(
+                    "Reading prompt  {} tokens  ·  {:.1}s",
+                    commas(total as u64),
+                    number(data, "/live/elapsed_s")
+                )
+            }
         } else if state == "generating" {
             format!(
                 "Generating  {} tokens  ·  {:.1} tok/s  ·  {:.1}s  ·  {} queued",
@@ -468,7 +486,7 @@ impl Ui {
         let (used, total) = if state == "reading" {
             (
                 number(data, "/live/prompt_read") as u64,
-                number(data, "/live/prompt_total") as u64,
+                number(data, "/live/prompt_total").max(number(data, "/live/prompt_tokens")) as u64,
             )
         } else if state == "generating" {
             (
@@ -877,15 +895,15 @@ impl Ui {
                 ),
             ]),
         );
-        let cache = &data["conversation_cache"];
+        let engine = &data["engine"];
         line(
             f,
             inner,
             10,
             Line::from(self.dim(format!(
-                "Conversation cache · {} / {} parked",
-                number(cache, "/parked"),
-                number(cache, "/slots")
+                "Conversation cache · {} budget · {} slots",
+                compact(number(engine, "/conversation_cache_mib") as u64),
+                number(engine, "/conversation_cache_slots")
             ))),
         );
         line(
@@ -893,15 +911,11 @@ impl Ui {
             inner,
             11,
             Line::from(vec![
+                self.dim("Engine "),
                 value(
-                    format!(
-                        "{} / {:.1} GiB",
-                        gib(number(cache, "/bytes") as u64),
-                        number(cache, "/budget_mib") / 1024.
-                    ),
+                    format!("{} · {}", text(engine, "/engine"), text(engine, "/quant")),
                     self.palette.fg,
                 ),
-                self.dim(format!(" · {} restores", number(cache, "/restores"))),
             ]),
         );
         line(
@@ -909,9 +923,8 @@ impl Ui {
             inner,
             12,
             Line::from(self.dim(format!(
-                "{} reused · {} evictions",
-                compact(m.totals().reused),
-                number(cache, "/evictions")
+                "{} prompt tokens reused",
+                compact(m.totals().reused)
             ))),
         );
         line(
@@ -1246,7 +1259,7 @@ impl Ui {
                     Line::from(self.dim(format!(
                         "Prefill {:.2}s · decode {:.2}s · total {:.1}s · {:.1} tok/s",
                         number(r, "/prompt_ms") / 1000.,
-                        number(r, "/decode_ms") / 1000.,
+                        decode_seconds(r),
                         number(r, "/duration_s"),
                         number(r, "/decode_tok_s")
                     ))),

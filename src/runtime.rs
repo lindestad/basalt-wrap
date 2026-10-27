@@ -373,10 +373,7 @@ pub fn worker(args: &Args) -> Result<i32> {
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let data = (|| -> Result<Metrics> {
-                    Ok(Metrics {
-                        status: api.get("/v1/status")?,
-                        data: api.get("/metrics?requests=all")?,
-                    })
+                    Ok(Metrics::new(api.get("/metrics")?, api.get("/v1/status")?))
                 })();
                 if tx
                     .send(Input::Metrics(data.map_err(|e| e.to_string())))
@@ -811,10 +808,7 @@ pub fn diagnose(args: &Args) -> Result<i32> {
     let config = read_config(args)?;
     let port = crate::config::port(args, &config);
     let api = Api::new(port, &api_key())?;
-    let m = Metrics {
-        status: api.get("/v1/status")?,
-        data: api.get("/metrics?requests=all")?,
-    };
+    let m = Metrics::new(api.get("/metrics")?, api.get("/v1/status")?);
     let index = args.gpu.as_deref().unwrap_or("0").parse::<u32>()?;
     let gpu = crate::hardware::gpus()?
         .into_iter()
@@ -1129,12 +1123,12 @@ mod tests {
             for (i, mut request) in server.incoming_requests().take(4).enumerate() {
                 let reply = match i {
                     0 => {
-                        assert_eq!(request.url(), "/v1/status");
-                        json!({"loaded":true,"activity":{"in_flight":2,"requests":1},"vram":{"elastic":true,"expert_cache_mib":4096,"expert_cache_full_mib":8192}})
+                        assert_eq!(request.url(), "/metrics");
+                        json!({"live":{"state":"generating"},"requests":(0..40).map(|i|json!({"time":i})).collect::<Vec<_>>()})
                     }
                     1 => {
-                        assert_eq!(request.url(), "/metrics?requests=all");
-                        json!({"live":{"state":"generating"},"requests":(0..40).map(|i|json!({"time":i})).collect::<Vec<_>>()})
+                        assert_eq!(request.url(), "/v1/status");
+                        json!({"loaded":true,"activity":{"in_flight":2,"requests":1},"vram":{"elastic":true,"expert_cache_mib":4096,"expert_cache_full_mib":8192}})
                     }
                     _ => {
                         assert_eq!(request.url(), "/v1/vram");
@@ -1151,10 +1145,7 @@ mod tests {
             }
         });
         let api = Api::new(port, "").unwrap();
-        let mut m = Metrics {
-            status: api.get("/v1/status").unwrap(),
-            data: api.get("/metrics?requests=all").unwrap(),
-        };
+        let mut m = Metrics::new(api.get("/metrics").unwrap(), api.get("/v1/status").unwrap());
         assert_eq!(m.data["requests"].as_array().unwrap().len(), 40);
         let mut hw = crate::hardware::Hardware {
             gpu_total: 16384 << 20,

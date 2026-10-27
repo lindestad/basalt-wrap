@@ -6,4 +6,5 @@
 - Retain the dashboard, request history, themes, elastic VRAM policy, live controls, and process cleanup.
 - Use separate settings, logs, control sockets, and systemd units.
 - Read API credentials from `BASALT_WRAP_API_KEY` for server launch and monitoring.
+- Sum session tokens and decode time across polls: Basalt lists only its recent requests and gives a decode rate instead of a decode duration.
 - Make installation link only the launcher, preserving model configs and shell bindings.
