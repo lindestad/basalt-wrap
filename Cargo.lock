@@ -110,6 +110,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "basalt-wrap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "clap_complete",
+ "crossterm",
+ "libc",
+ "nvml-wrapper",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "signal-hook 0.4.5",
+ "tempfile",
+ "tiny_http",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1832,25 +1851,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "basalt-wrap"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "clap_complete",
- "crossterm",
- "libc",
- "nvml-wrapper",
- "ratatui",
- "reqwest",
- "serde",
- "serde_json",
- "signal-hook 0.4.5",
- "tempfile",
- "tiny_http",
-]
 
 [[package]]
 name = "strsim"

@@ -47,6 +47,7 @@ pub fn launch(args: &Args) -> Result<i32> {
     let config = runtime::read_config(args)?;
     let port = crate::config::port(args, &config);
     let mut app = App::new(crate::config::model_name(&config).into(), port);
+    app.pricing = model::pricing(&config);
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
     app.step_mib = args.step_mib;
@@ -586,6 +587,8 @@ pub fn attach(args: &Args) -> Result<i32> {
         let state: control::Snapshot =
             serde_json::from_value(control::call(args, control::Command::Status)?)?;
         app.address = format!("127.0.0.1:{}", state.port);
+        // the worker read the model config; its rates ride the config path it reports
+        app.pricing = model::pricing_at(&state.config_path);
         app.apply(Event::Supervisor(Box::new(state)));
         (None, 0)
     } else {
@@ -599,6 +602,7 @@ pub fn attach(args: &Args) -> Result<i32> {
         let port = crate::config::port(args, &model);
         app.address = format!("127.0.0.1:{port}");
         app.policy = "Read-only attachment · external policy unknown".into();
+        app.pricing = crate::model::pricing(&model);
         (
             Some(runtime::Api::new(port, &runtime::api_key())?),
             resolved.gpu.as_deref().unwrap_or("0").parse()?,
