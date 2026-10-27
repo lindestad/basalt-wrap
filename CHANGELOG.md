@@ -11,4 +11,5 @@
 - Read the conversation cache budget as GiB and show the quantization on its own line; the values were clipped or mis-scaled at typical panel widths.
 - Count the session from the server's start, not the wrapper's, so an attachment shows the session it joined; follow the running server's log from an attachment, over the worker's file or the server's `/api/logs`.
 - Show the session's token cost in the header, at the model config's `pricing` rates: cached prompt tokens at the cache-read rate, the rest at prompt and completion rates. A `≥` marks the figure as a floor when history is incomplete.
+- Show the conversation cache live — parked conversations, bytes against the budget, restores and evictions — from the `conversation_cache` block the updated server adds to `/metrics`; older servers keep the budget-and-slots fallback.
 - Make installation link only the launcher, preserving model configs and shell bindings.

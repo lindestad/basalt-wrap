@@ -921,42 +921,81 @@ impl Ui {
             ]),
         );
         let engine = &data["engine"];
+        let cache = &data["conversation_cache"];
+        // live parked/bytes/evictions when the server reports them, the configured budget when not
+        let budget =
+            number(cache, "/budget_mib").max(number(engine, "/conversation_cache_mib")) as u64;
+        let slots = number(cache, "/slots").max(number(engine, "/conversation_cache_slots")) as u64;
+        let parked = cache.get("parked").and_then(serde_json::Value::as_f64);
+        let bytes = cache.get("bytes").and_then(serde_json::Value::as_f64);
         line(
             f,
             inner,
             10,
-            Line::from(self.dim(format!(
-                "Conversation cache · {} · {} slots",
-                mib(number(engine, "/conversation_cache_mib") as u64),
-                number(engine, "/conversation_cache_slots") as u64
-            ))),
+            Line::from(self.dim(match parked {
+                Some(parked) => {
+                    format!("Conversation cache · {} / {} parked", parked as u64, slots)
+                }
+                None => format!("Conversation cache · {} · {} slots", mib(budget), slots),
+            })),
         );
         line(
             f,
             inner,
             11,
-            Line::from(vec![
-                self.dim("Engine "),
+            Line::from(match bytes {
+                Some(bytes) => vec![self.dim(format!(
+                    "{:.1} / {:.1} GiB · {} restores",
+                    bytes / 1073741824.,
+                    budget as f64 / 1024.,
+                    number(cache, "/restores") as u64
+                ))],
                 // the version rides in the header; the panel has room for the quantization alone
-                value(
-                    [text(engine, "/quant"), text(engine, "/version")]
-                        .into_iter()
-                        .find(|s| !s.is_empty())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    self.palette.fg,
-                ),
-            ]),
+                None => vec![
+                    self.dim("Engine "),
+                    value(
+                        [text(engine, "/quant"), text(engine, "/version")]
+                            .into_iter()
+                            .find(|s| !s.is_empty())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        self.palette.fg,
+                    ),
+                ],
+            }),
         );
         line(
             f,
             inner,
             12,
-            Line::from(self.dim(format!(
-                "{} prompt tokens reused",
-                compact(m.totals().reused)
-            ))),
+            Line::from(self.dim(if cache.get("evictions").is_some() {
+                format!(
+                    "{} reused · {} evictions",
+                    compact(m.totals().reused),
+                    number(cache, "/evictions") as u64
+                )
+            } else {
+                format!("{} reused", compact(m.totals().reused))
+            })),
         );
+        if parked.is_some() {
+            line(
+                f,
+                inner,
+                13,
+                Line::from(vec![
+                    self.dim("Engine "),
+                    value(
+                        [text(engine, "/quant"), text(engine, "/version")]
+                            .into_iter()
+                            .find(|s| !s.is_empty())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        self.palette.fg,
+                    ),
+                ]),
+            );
+        }
         line(
             f,
             inner,
@@ -1670,6 +1709,36 @@ mod tests {
         assert_eq!(mib(6144), "6 GiB");
         assert_eq!(mib(1500), "1.5 GiB");
         assert_eq!(mib(0), "off");
+    }
+
+    #[test]
+    fn the_cache_panel_shows_the_servers_live_cache_when_it_reports_one() {
+        let mut app = crate::model::App::new("m".into(), 8080);
+        app.connected = true;
+        app.apply(crate::model::Event::Metrics(Box::new(
+            crate::model::Metrics::new(
+                json!({"engine":{"model":"m","max_context":262144,"version":"0.0.1",
+                        "kv":"int8","kv_resident":20480,"expert_slots":3660,
+                        "conversation_cache_mib":16384,"conversation_cache_slots":6,
+                        "quant":"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"},
+                       "conversation_cache":{"parked":2,"slots":6,"bytes":3221225472u64,
+                           "budget_mib":16384,"restores":5,"evictions":1},
+                       "live":{"state":"idle","slots":{"total":1,"active":0,"queue_depth":0}},
+                       "requests":[{"id":"r_0001","time":1.0,"prompt_tokens":9000,"reused":1500,
+                                    "output_tokens":100,"duration_s":2.0,"decode_tok_s":50.0}]}),
+                json!({"loaded":true,"activity":{"requests":1,"in_flight":0},
+                       "vram":{"expert_cache_mib":7168,"expert_cache_full_mib":7328}}),
+                serde_json::Value::Null,
+            ),
+        )));
+        let text = snapshot(&app, 120, 40, false).unwrap();
+        assert!(text.contains("Conversation cache · 2 / 6 parked"), "{text}");
+        assert!(text.contains("3.0 / 16.0 GiB · 5 restores"), "{text}");
+        assert!(text.contains("1,500 reused · 1 evictions"), "{text}");
+        assert!(
+            text.contains("Engine Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"),
+            "{text}"
+        );
     }
 
     #[test]
