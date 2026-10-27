@@ -17,7 +17,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug, Clone)]
 #[command(
     version,
-    about = "A Strata inference dashboard and elastic VRAM supervisor"
+    about = "A Basalt inference dashboard and elastic VRAM supervisor"
 )]
 pub struct Args {
     /// Validate the checkout, model, systemd user manager, GPU, and effective policy
@@ -41,7 +41,7 @@ pub struct Args {
     /// Show request ages with seconds (toggle with a)
     #[arg(long)]
     pub age_seconds: bool,
-    /// Per-user wrapper settings (distinct from the positional Strata model JSON)
+    /// Per-user wrapper settings (distinct from the positional Basalt model JSON)
     #[arg(long = "config")]
     pub wrapper_config: Option<PathBuf>,
     /// Use built-in settings without reading the user config
@@ -50,7 +50,7 @@ pub struct Args {
     /// Create a starter config without overwriting an existing file
     #[arg(long)]
     pub init_config: bool,
-    /// Validate user settings without starting Strata
+    /// Validate user settings without starting Basalt
     #[arg(long)]
     pub check_config: bool,
     /// List NVIDIA GPU indices, UUIDs, and memory sizes
@@ -80,11 +80,11 @@ pub struct Args {
     pub auto_grow_below: bool,
     /// iq3_s, ud-iq3_s, a model JSON path, or 'install'
     pub model: Option<String>,
-    #[arg(long, default_value_os_t = home().join("apps/Strata"))]
-    pub strata_dir: PathBuf,
+    #[arg(long, default_value_os_t = home().join("apps/basalt"))]
+    pub basalt_dir: PathBuf,
     #[arg(long)]
     pub port: Option<u16>,
-    #[arg(long, default_value = "strata-wrap")]
+    #[arg(long, default_value = "basalt-wrap")]
     pub unit: String,
     #[arg(long, default_value_t = 1024)]
     pub min_free_mib: u64,
@@ -100,13 +100,13 @@ pub struct Args {
     /// Include unfiltered server output in plain mode
     #[arg(long)]
     pub raw: bool,
-    /// Preview the dashboard with sample data, without starting Strata
+    /// Preview the dashboard with sample data, without starting Basalt
     #[arg(long, visible_alias = "preview")]
     pub demo: bool,
     /// Choose a palette for this launch (overrides the saved preference)
     #[arg(long, value_enum)]
     pub theme: Option<theme::Theme>,
-    /// List palettes without starting Strata
+    /// List palettes without starting Basalt
     #[arg(long)]
     pub list_themes: bool,
     /// Render sample data at WIDTHxHEIGHT to plain text (or JSON with --cells)
@@ -133,8 +133,8 @@ pub fn home() -> PathBuf {
 impl Args {
     pub fn config(&self) -> PathBuf {
         match self.model.as_deref().unwrap_or("iq3_s") {
-            "iq3_s" => self.strata_dir.join("strata-iq3_s.json"),
-            "ud-iq3_s" => self.strata_dir.join("strata-ud-iq3_s.json"),
+            "iq3_s" => self.basalt_dir.join("basalt-iq3_s.json"),
+            "ud-iq3_s" => self.basalt_dir.join("basalt-ud-iq3_s.json"),
             path => std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path)),
         }
     }
@@ -183,11 +183,14 @@ impl Args {
                 "--api-key",
                 "--gpu",
                 "--gpus",
+                "--model",
+                "--engine-bin",
+                "--python",
             ]
             .contains(&v.split('=').next().unwrap_or(""))
         }) {
             bail!(
-                "the wrapper owns host, port and engine; set the model and API key in its JSON config"
+                "the wrapper owns host, port, model, engine and API key; use the model JSON and BASALT_WRAP_API_KEY"
             );
         }
         Ok(())
@@ -201,7 +204,7 @@ fn run() -> Result<i32> {
         clap_complete::generate(
             shell,
             &mut Args::command(),
-            "strata-wrap",
+            "basalt-wrap",
             &mut std::io::stdout(),
         );
         return Ok(0);
@@ -296,7 +299,7 @@ fn main() {
     let code = match run() {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("strata-wrap: {error:#}");
+            eprintln!("basalt-wrap: {error:#}");
             1
         }
     };

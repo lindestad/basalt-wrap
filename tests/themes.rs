@@ -3,7 +3,7 @@ use std::process::Command;
 #[test]
 fn theme_cli_is_usable_without_a_model_or_server() {
     let root = tempfile::tempdir().unwrap();
-    let binary = env!("CARGO_BIN_EXE_strata-wrap");
+    let binary = env!("CARGO_BIN_EXE_basalt-wrap");
     let output = Command::new(binary)
         .arg("--list-themes")
         .env("XDG_CONFIG_HOME", root.path())
@@ -30,8 +30,8 @@ fn theme_cli_is_usable_without_a_model_or_server() {
                 "--snapshot",
                 "80x24",
                 "--cells",
-                "--strata-dir",
-                "/nonexistent-strata-theme-preview",
+                "--basalt-dir",
+                "/nonexistent-basalt-theme-preview",
             ])
             .env("XDG_CONFIG_HOME", root.path())
             .output()

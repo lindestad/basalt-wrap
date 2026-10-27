@@ -1,0 +1,32 @@
+{
+  "server": {
+    "model": "model.basalt",
+    "alias": "qwen3.8-flash-next-iq3_s",
+    "host": "127.0.0.1",
+    "port": 8080,
+    "gpu": "0",
+    "vision": "cpu",
+    "temperature": 1.0,
+    "top-p": 0.95,
+    "top-k": 20,
+    "min-p": 0.0,
+    "presence-penalty": 0.0,
+    "repetition-penalty": 1.0
+  },
+  "engine": {
+    "max-context": 262144,
+    "kv": "int8",
+    "kv-resident": 20480,
+    "vram-reserve-mib": 1152,
+    "expert-cache": "auto",
+    "resident-experts": true,
+    "prefill": "auto:32768",
+    "prefill-cpu-share": 0.6,
+    "spec": 4,
+    "pool-workers": 7,
+    "conversation-cache-mib": 16384,
+    "conversation-cache-slots": 6,
+    "vram-elastic": true,
+    "vram-segment-mib": 512
+  }
+}

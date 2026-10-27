@@ -380,7 +380,7 @@ impl Hardware {
             processes: vec![
                 GpuProcess {
                     pid: 3492,
-                    name: "strata".into(),
+                    name: "basalt".into(),
                     kind: "C".into(),
                     vram: Some(11264 << 20),
                     rss: 49 * gb,

@@ -144,7 +144,7 @@ pub fn socket_path(args: &Args) -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
-        .join("strata-wrap")
+        .join("basalt-wrap")
         .join(format!("{}.sock", args.unit_name()))
 }
 
@@ -252,9 +252,9 @@ mod tests {
     #[test]
     fn socket_reports_live_state_controls_and_cleans_up() {
         let temp = tempfile::tempdir().unwrap();
-        let mut args = Args::parse_from(["strata-wrap"]);
+        let mut args = Args::parse_from(["basalt-wrap"]);
         args.unit = format!(
-            "strata-wrap-socket-test-{}",
+            "basalt-wrap-socket-test-{}",
             temp.path()
                 .file_name()
                 .unwrap()

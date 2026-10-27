@@ -64,7 +64,7 @@ impl Log {
         let dir = std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| crate::home().join(".local/state"))
-            .join("strata-wrap");
+            .join("basalt-wrap");
         fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{model}.log"));
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
@@ -176,6 +176,33 @@ impl Api {
     }
 }
 
+pub fn api_key() -> String {
+    std::env::var("BASALT_WRAP_API_KEY").unwrap_or_default()
+}
+
+pub fn server_command(args: &Args, port: u16) -> Command {
+    let mut command = Command::new(args.basalt_dir.join("bin/basalt"));
+    command
+        .args(["serve", "--config"])
+        .arg(args.config())
+        .args(&args.server_args)
+        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
+        .current_dir(&args.basalt_dir)
+        .env("PYTHONUNBUFFERED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    if let Some(gpu) = &args.gpu {
+        command.args(["--gpu", gpu]);
+    }
+    let key = api_key();
+    if !key.is_empty() {
+        command.args(["--api-key", &key]);
+    }
+    command
+}
+
 pub(crate) enum Input {
     Control(crate::control::Request),
     Metrics(Result<Metrics, String>),
@@ -245,9 +272,7 @@ pub fn worker(args: &Args) -> Result<i32> {
     let config: Value =
         serde_json::from_slice(&fs::read(args.config()).context("read model config")?)?;
     crate::config::validate_model(args, &config)?;
-    let port = args
-        .port
-        .unwrap_or_else(|| config["port"].as_u64().unwrap_or(8080) as u16);
+    let port = crate::config::port(args, &config);
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
@@ -256,7 +281,7 @@ pub fn worker(args: &Args) -> Result<i32> {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(runtime.join(format!("strata-wrap-{port}.lock")))?;
+        .open(runtime.join(format!("basalt-wrap-{port}.lock")))?;
     // SAFETY: flock uses a live descriptor and does not retain a Rust pointer.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("another wrapper owns port {port}");
@@ -287,12 +312,12 @@ pub fn worker(args: &Args) -> Result<i32> {
         args.config()
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("strata"),
+            .unwrap_or("basalt"),
     )?);
     log.write(
         &format!(
             "Loading {} on 127.0.0.1:{port}",
-            config["model_name"].as_str().unwrap_or("Strata")
+            crate::config::model_name(&config)
         ),
         false,
     );
@@ -312,22 +337,9 @@ pub fn worker(args: &Args) -> Result<i32> {
         args.gpu.as_deref().unwrap_or("0"), args.min_free_mib, args.grow_below_mib, args.growth_mode,
         args.grow_delay, args.step_mib,args.accounting_margin_mib,args.no_op_retry,
         if args.no_vram_management { "; management disabled" } else { "" }),false);
-    let api = Api::new(port, config["api_key"].as_str().unwrap_or(""))?;
-    let mut command = Command::new(args.strata_dir.join(".venv/bin/python"));
-    command
-        .args(["-u", "serve/server.py", "--engine", "strata", "--config"])
-        .arg(args.config())
-        .args(&args.server_args)
-        .args(["--host", "127.0.0.1", "--port", &port.to_string()])
-        .current_dir(&args.strata_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
-    if let Some(gpu) = &args.gpu {
-        command.args(["--gpu", gpu]);
-    }
-    let mut server = Server(command.spawn().context("start Strata")?);
+    let api = Api::new(port, &api_key())?;
+    let mut command = server_command(args, port);
+    let mut server = Server(command.spawn().context("start Basalt")?);
     for pipe in [
         server
             .0
@@ -436,7 +448,7 @@ pub fn worker(args: &Args) -> Result<i32> {
             };
             // SAFETY: poll references one initialized descriptor for this call.
             if unsafe { libc::poll(&mut poll, 1, 0) } > 0 {
-                log.write("Launcher exited; stopping Strata", false);
+                log.write("Launcher exited; stopping Basalt", false);
                 break;
             }
         }
@@ -732,7 +744,7 @@ pub fn worker(args: &Args) -> Result<i32> {
         }
     }
     stop.store(true, Ordering::Relaxed);
-    log.write("Stopping Strata", false);
+    log.write("Stopping Basalt", false);
     server.stop();
     log.write("Stopped", false);
     Ok(result)
@@ -797,10 +809,8 @@ pub fn diagnose(args: &Args) -> Result<i32> {
         return Ok(0);
     }
     let config = read_config(args)?;
-    let port = args
-        .port
-        .unwrap_or_else(|| config["port"].as_u64().unwrap_or(8080) as u16);
-    let api = Api::new(port, config["api_key"].as_str().unwrap_or(""))?;
+    let port = crate::config::port(args, &config);
+    let api = Api::new(port, &api_key())?;
     let m = Metrics {
         status: api.get("/v1/status")?,
         data: api.get("/metrics?requests=all")?,
@@ -848,7 +858,7 @@ pub fn diagnose(args: &Args) -> Result<i32> {
                 "grow_delay_seconds":args.grow_delay,"step_mib":args.step_mib,"accounting_margin_mib":args.accounting_margin_mib},
             "engine":{"busy":m.busy(),"cache_mib":m.cache(),"full_cache_mib":m.full_cache(),"activity":m.activity()},
             "growth_blockers":reasons,
-            "timing_note":"This snapshot cannot read the running worker's timer. Capacity mode waits for sustained spare VRAM; idle mode also waits for inference to stop. Strata applies queued resizes between requests."
+            "timing_note":"This snapshot cannot read the running worker's timer. Capacity mode waits for sustained spare VRAM; idle mode also waits for inference to stop. Basalt applies queued resizes between requests."
         }))?
     );
     Ok(0)
@@ -876,7 +886,7 @@ pub fn launch_command(args: &Args) -> Result<Command> {
         "--property=Restart=no",
     ]);
     for (key, value) in std::env::vars() {
-        if key.starts_with("STRATA_")
+        if key.starts_with("BASALT_")
             || [
                 "TERM",
                 "NO_COLOR",
@@ -904,8 +914,8 @@ pub fn launch_command(args: &Args) -> Result<Command> {
             "--owner-start",
             &pid_start(std::process::id())?,
         ])
-        .arg("--strata-dir")
-        .arg(std::path::absolute(&args.strata_dir)?)
+        .arg("--basalt-dir")
+        .arg(std::path::absolute(&args.basalt_dir)?)
         .args([
             "--unit",
             &args.unit,
@@ -989,6 +999,42 @@ mod tests {
     }
 
     #[test]
+    fn launches_basalt_serve_with_the_selected_config_and_loopback() {
+        use clap::Parser;
+        let args = Args::parse_from([
+            "basalt-wrap",
+            "/tmp/model.json",
+            "--basalt-dir",
+            "/tmp/basalt",
+            "--gpu",
+            "2",
+            "--",
+            "--idle-unload",
+            "120",
+        ]);
+        let command = server_command(&args, 18080);
+        assert_eq!(command.get_program(), "/tmp/basalt/bin/basalt");
+        let argv: Vec<_> = command.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            &argv[..11],
+            [
+                "serve",
+                "--config",
+                "/tmp/model.json",
+                "--idle-unload",
+                "120",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "18080",
+                "--gpu",
+                "2"
+            ]
+            .as_slice()
+        );
+    }
+
+    #[test]
     fn known_busy_responses_defer_but_uncertain_failures_pause() {
         for (status, reply) in [
             (409, json!({"error":{"type":"model_busy"}})),
@@ -1027,7 +1073,7 @@ mod tests {
     fn worker_receives_resolved_settings_without_reloading_the_file() {
         use clap::{CommandFactory, FromArgMatches, Parser};
         let mut original = Args::parse_from([
-            "strata-wrap",
+            "basalt-wrap",
             "iq3_s",
             "--growth-mode",
             "capacity",
@@ -1057,7 +1103,7 @@ mod tests {
         let start = argv.iter().position(|s| s == "iq3_s").unwrap();
         let matches = Args::command()
             .try_get_matches_from(
-                std::iter::once(std::ffi::OsString::from("strata-wrap"))
+                std::iter::once(std::ffi::OsString::from("basalt-wrap"))
                     .chain(argv[start..].iter().cloned()),
             )
             .unwrap();

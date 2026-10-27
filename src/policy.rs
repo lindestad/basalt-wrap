@@ -176,7 +176,7 @@ impl Policy {
     pub fn status(&self, now: f64) -> String {
         if let Some((action, _)) = &self.pending {
             return format!(
-                "{} queued · waiting for Strata",
+                "{} queued · waiting for Basalt",
                 if action.grow { "Grow" } else { "Shrink" }
             );
         }

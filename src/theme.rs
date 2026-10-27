@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 #[serde(rename_all = "kebab-case")]
 pub enum Theme {
     #[default]
-    Strata,
+    Basalt,
     Ember,
     Monochrome,
     Nord,
@@ -38,7 +38,7 @@ pub struct Palette {
 
 impl Theme {
     pub const ALL: [Self; 11] = [
-        Self::Strata,
+        Self::Basalt,
         Self::Ember,
         Self::Monochrome,
         Self::Nord,
@@ -53,7 +53,7 @@ impl Theme {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Strata => "strata",
+            Self::Basalt => "basalt",
             Self::Ember => "ember",
             Self::Monochrome => "monochrome",
             Self::Nord => "nord",
@@ -69,7 +69,7 @@ impl Theme {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::Strata => "Midnight blue · sea glass & lavender",
+            Self::Basalt => "Midnight blue · sea glass & lavender",
             Self::Ember => "Carbon black · white & burnt orange",
             Self::Monochrome => "Pure grayscale · no color accents",
             Self::Nord => "Polar slate · frost & aurora",
@@ -87,7 +87,7 @@ impl Theme {
         // Background, surface, edge, text, muted, primary, secondary,
         // success, warning, error, selection / gauge track.
         let colors = match self {
-            Self::Strata => [
+            Self::Basalt => [
                 0x0f141e, 0x141c29, 0x2b394d, 0xd7e1ef, 0x8093ab, 0x6fd7cf, 0xb0a1f1, 0x9fd5aa,
                 0xedc78b, 0xee8f99, 0x232f41,
             ],
@@ -166,7 +166,7 @@ pub fn preferences_path() -> PathBuf {
         .filter(|p| Path::new(p).is_absolute())
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::home().join(".config"))
-        .join("strata-wrap/preferences.json")
+        .join("basalt-wrap/preferences.json")
 }
 
 pub fn load(path: &Path) -> Result<Theme> {
@@ -227,7 +227,7 @@ mod tests {
     fn preferences_round_trip_preserves_other_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings/preferences.json");
-        assert_eq!(load(&path).unwrap(), Theme::Strata);
+        assert_eq!(load(&path).unwrap(), Theme::Basalt);
         save(&path, Theme::Ember).unwrap();
         assert_eq!(load(&path).unwrap(), Theme::Ember);
         std::fs::write(&path, r#"{"theme":"nord","other":42}"#).unwrap();

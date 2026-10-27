@@ -376,7 +376,7 @@ impl App {
                 .iter()
                 .any(|s| message.contains(s))
                 {
-                    self.loading_note = sanitize(message.trim_start_matches("[strata] "));
+                    self.loading_note = sanitize(message.trim_start_matches("[basalt] "));
                 }
                 if self.scroll > 0 && self.view == View::Logs {
                     self.scroll += 1;
@@ -516,7 +516,7 @@ pub fn demo() -> App {
         app.logs.push_back(message.into());
     }
     use clap::Parser;
-    let args = crate::Args::parse_from(["strata-wrap", "iq3_s"]);
+    let args = crate::Args::parse_from(["basalt-wrap", "iq3_s"]);
     let mut state = crate::control::Snapshot::new(&args, 8080);
     state.policy = app.policy.clone();
     state.metrics = Some(app.metrics.clone());

@@ -304,7 +304,7 @@ impl Ui {
             top[0],
             0,
             Line::from(vec![
-                value(" STRATA", self.palette.accent).add_modifier(Modifier::BOLD),
+                value(" BASALT", self.palette.accent).add_modifier(Modifier::BOLD),
                 self.dim("  /  "),
                 value(app.model.clone(), self.palette.fg),
             ]),
@@ -604,7 +604,7 @@ impl Ui {
                     error.clone()
                 } else {
                     format!(
-                        "Strata {}G · other {}G · {} {}G",
+                        "Basalt {}G · other {}G · {} {}G",
                         gib(owned),
                         gib(hw.gpu_allocated().saturating_sub(owned)),
                         if left.width < 44 { "res" } else { "reserved" },
@@ -1397,7 +1397,7 @@ impl Ui {
     fn small(&self, f: &mut Frame, app: &App, area: Rect) {
         let t = app.metrics.totals();
         let lines = vec![
-            Line::from(value(" STRATA", self.palette.accent)),
+            Line::from(value(" BASALT", self.palette.accent)),
             Line::from(app.model.clone()),
             Line::from(value(app.policy.clone(), self.palette.accent)),
             Line::from(format!(
@@ -1508,7 +1508,7 @@ impl Ui {
             height,
         );
         f.render_widget(Clear, rect);
-        let inner = self.inside(f, rect, "Strata · keyboard & metrics");
+        let inner = self.inside(f, rect, "Basalt · keyboard & metrics");
         let lines = [
             "1 / 2 / 3 / 4 / Tab   Overview / requests / logs / policy",
             "Space / r / c      Pause growth / reconcile / preview VRAM reload",
@@ -1520,7 +1520,7 @@ impl Ui {
             "gg / G             First / last request; oldest / newest log",
             "Enter              Open the selected request's details",
             "p / Esc            Focus GPU processes / return; j/k scroll",
-            "b                   Open Strata's web dashboard",
+            "b                   Open Basalt's web dashboard",
             "t                   Themes · hjkl preview · Enter apply · Esc cancel",
             "? / Esc             Close this help",
             if app.attached {
@@ -1528,7 +1528,7 @@ impl Ui {
             } else if app.demo {
                 "q / Ctrl+C          Close this preview"
             } else {
-                "q / Ctrl+C          Stop Strata and exit (again to force)"
+                "q / Ctrl+C          Stop Basalt and exit (again to force)"
             },
             "",
             "Session avg = output tokens / active decode seconds.",
@@ -1604,7 +1604,7 @@ mod tests {
     fn theme_picker_keeps_last_palette_visible_in_a_short_terminal() {
         let mut app = crate::model::demo();
         app.theme = crate::theme::Theme::Everforest;
-        app.theme_picker = Some(crate::theme::Theme::Strata);
+        app.theme_picker = Some(crate::theme::Theme::Basalt);
         let text = snapshot(&app, 80, 14, false).unwrap();
         assert!(text.contains("› everforest"));
         assert!(text.contains("Enter apply"));

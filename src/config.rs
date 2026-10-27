@@ -25,7 +25,7 @@ pub struct Settings {
     pub schema_version: u32,
     pub age_seconds: bool,
     pub profiles: std::collections::BTreeMap<String, serde_json::Value>,
-    pub strata_dir: Option<PathBuf>,
+    pub basalt_dir: Option<PathBuf>,
     pub model: Option<String>,
     pub port: Option<u16>,
     pub unit: String,
@@ -39,10 +39,10 @@ impl Default for Settings {
             schema_version: 1,
             age_seconds: false,
             profiles: Default::default(),
-            strata_dir: None,
+            basalt_dir: None,
             model: None,
             port: None,
-            unit: "strata-wrap".into(),
+            unit: "basalt-wrap".into(),
             gpu: None,
             theme: None,
             vram: Vram::default(),
@@ -84,7 +84,7 @@ pub fn default_path() -> PathBuf {
         .filter(|p| Path::new(p).is_absolute())
         .map(PathBuf::from)
         .unwrap_or_else(|| crate::home().join(".config"))
-        .join("strata-wrap/config.json")
+        .join("basalt-wrap/config.json")
 }
 
 pub fn load(path: &Path, required: bool) -> Result<Settings> {
@@ -235,10 +235,10 @@ pub fn apply(args: &mut Args, matches: &ArgMatches) -> Result<()> {
     )?;
     let from_cli = |name: &str| matches.value_source(name) == Some(ValueSource::CommandLine);
     let parent = path.parent().unwrap_or(Path::new("."));
-    if !from_cli("strata_dir")
-        && let Some(p) = &settings.strata_dir
+    if !from_cli("basalt_dir")
+        && let Some(p) = &settings.basalt_dir
     {
-        args.strata_dir = configured_path(p, parent);
+        args.basalt_dir = configured_path(p, parent);
     }
     if args.model.is_none()
         && let Some(model) = &settings.model
@@ -320,22 +320,13 @@ pub fn thresholds(
 }
 
 pub fn resolve_model(args: &mut Args, model: &serde_json::Value) -> Result<()> {
-    ensure!(
-        model
-            .get("replicas")
-            .is_none_or(|v| v.is_null() || v.as_u64() == Some(1)),
-        "replica configurations are not supported by elastic VRAM management"
-    );
     let selector = if let Some(gpu) = &args.gpu {
         gpu.clone()
     } else {
-        match model.get("gpu") {
+        match option(model, "server", "gpu") {
             None | Some(serde_json::Value::Null) => "0".to_owned(),
             Some(serde_json::Value::Number(n)) => n.to_string(),
             Some(serde_json::Value::String(s)) if !s.contains(',') => s.clone(),
-            Some(serde_json::Value::Array(a)) if a.len() == 1 => {
-                a[0].to_string().trim_matches('"').to_owned()
-            }
             _ => bail!(
                 "elastic VRAM management supports one NVIDIA GPU; choose a single GPU in the model config"
             ),
@@ -362,23 +353,104 @@ pub fn resolve_model(args: &mut Args, model: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
+pub fn option<'a>(
+    model: &'a serde_json::Value,
+    section: &str,
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    model
+        .get(section)?
+        .as_object()?
+        .iter()
+        .rev()
+        .find_map(|(key, value)| {
+            (key.trim()
+                .to_lowercase()
+                .replace('_', "-")
+                .trim_start_matches("--")
+                == name)
+                .then_some(value)
+        })
+}
+
+pub fn port(args: &Args, model: &serde_json::Value) -> u16 {
+    args.port.unwrap_or_else(|| {
+        option(model, "server", "port")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(8080) as u16
+    })
+}
+
+pub fn model_name(model: &serde_json::Value) -> &str {
+    option(model, "server", "alias")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Basalt")
+}
+
+pub fn model_path(args: &Args, model: &serde_json::Value) -> Result<PathBuf> {
+    let path = option(model, "server", "model")
+        .and_then(serde_json::Value::as_str)
+        .context("server.model must name a .basalt file")?;
+    Ok(configured_path(
+        Path::new(path),
+        args.config().parent().context("config needs a directory")?,
+    ))
+}
+
 pub fn validate_model(args: &Args, model: &serde_json::Value) -> Result<()> {
-    if let Some(port) = model.get("port") {
+    let object = model
+        .as_object()
+        .context("model config must be a JSON object")?;
+    ensure!(
+        object
+            .keys()
+            .all(|k| matches!(k.as_str(), "server" | "engine")),
+        "Basalt model config must contain only server and engine blocks"
+    );
+    for section in ["server", "engine"] {
+        if let Some(value) = model.get(section) {
+            ensure!(value.is_object(), "{section} must be an object");
+            ensure!(
+                value.as_object().unwrap().keys().all(|k| !k
+                    .chars()
+                    .filter(|c| c.is_ascii_alphabetic())
+                    .collect::<String>()
+                    .to_lowercase()
+                    .starts_with("apikey")),
+                "Basalt does not accept api-key in JSON; use BASALT_WRAP_API_KEY"
+            );
+        }
+    }
+    if let Some(port) = option(model, "server", "port") {
         ensure!(
             port.as_u64().is_some_and(|p| (1..=65535).contains(&p)),
             "model port must be an integer between 1 and 65535"
         );
     }
+    let selector = option(model, "server", "gpu");
+    ensure!(
+        args.gpu.is_some()
+            || selector
+                .is_none_or(|v| v.as_u64().is_some()
+                    || v.as_str().is_some_and(|s| s.parse::<u32>().is_ok())),
+        "the wrapper supports one NVIDIA GPU; set server.gpu to a single index"
+    );
     if !args.no_vram_management {
         ensure!(
-            model["vram_elastic"] == true,
-            "enable vram_elastic in {}",
+            option(model, "engine", "vram-elastic") == Some(&serde_json::Value::Bool(true)),
+            "enable engine.vram-elastic in {} (or use --no-vram-management)",
             args.config().display()
         );
-        let segment = model["vram_segment_mib"].as_u64().unwrap_or(512);
+        let segment = option(model, "engine", "vram-segment-mib")
+            .map(|v| {
+                v.as_u64()
+                    .context("engine.vram-segment-mib must be an integer")
+            })
+            .transpose()?
+            .unwrap_or(512);
         ensure!(
             segment >= 64 && args.step_mib.is_multiple_of(segment),
-            "step_mib must be a multiple of the model's vram_segment_mib ({segment})"
+            "step_mib must be a multiple of engine.vram-segment-mib ({segment})"
         );
     }
     Ok(())
@@ -411,13 +483,45 @@ mod tests {
     use super::*;
     use clap::{CommandFactory, FromArgMatches};
     #[test]
+    fn basalt_config_reads_nested_options_and_checks_elastic_segments() {
+        use clap::Parser;
+        let args = Args::parse_from(["basalt-wrap", "/tmp/config/model.json"]);
+        let model = serde_json::json!({"server":{"model":"weights.basalt","port":18088,"alias":"test","gpu":"0"},"engine":{"vram_elastic":true,"vram_segment_mib":256}});
+        validate_model(&args, &model).unwrap();
+        assert_eq!(port(&args, &model), 18088);
+        assert_eq!(model_name(&model), "test");
+        assert_eq!(
+            model_path(&args, &model).unwrap(),
+            PathBuf::from("/tmp/config/weights.basalt")
+        );
+        let mut args = args;
+        args.port = Some(19000);
+        assert_eq!(port(&args, &model), 19000);
+        for invalid in [
+            serde_json::json!({"port":8080,"vram_elastic":true}),
+            serde_json::json!({"server":{"port":65536},"engine":{"vram-elastic":true}}),
+            serde_json::json!({"server":{"gpu":"0,1"},"engine":{"vram-elastic":true}}),
+            serde_json::json!({"server":{"API_KEY":"secret"},"engine":{"vram-elastic":true}}),
+            serde_json::json!({"engine":{"vram-elastic":true,"vram-segment-mib":384}}),
+            serde_json::json!({"engine":{}}),
+        ] {
+            assert!(
+                validate_model(&args, &invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        args.no_vram_management = true;
+        validate_model(&args, &serde_json::json!({"engine":{}})).unwrap();
+    }
+
+    #[test]
     fn cli_overrides_saved_values_and_relative_paths_follow_the_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path,r#"{"model":"models/model.json","strata_dir":"engine","gpu":2,"theme":"ember","vram":{"min_free_mib":1024,"grow_below_mib":10000,"growth_mode":"capacity","step_mib":256}}"#).unwrap();
+        std::fs::write(&path,r#"{"model":"models/model.json","basalt_dir":"engine","gpu":2,"theme":"ember","vram":{"min_free_mib":1024,"grow_below_mib":10000,"growth_mode":"capacity","step_mib":256}}"#).unwrap();
         let matches = Args::command()
             .try_get_matches_from([
-                "strata-wrap",
+                "basalt-wrap",
                 "--config",
                 path.to_str().unwrap(),
                 "--min-free-mib",
@@ -435,7 +539,7 @@ mod tests {
         assert_eq!(args.step_mib, 256);
         assert_eq!(args.gpu.as_deref(), Some("2"));
         assert_eq!(args.theme, Some(Theme::Ember));
-        assert_eq!(args.strata_dir, dir.path().join("engine"));
+        assert_eq!(args.basalt_dir, dir.path().join("engine"));
         assert_eq!(
             args.model.as_deref(),
             dir.path().join("models/model.json").to_str()
@@ -449,7 +553,7 @@ mod tests {
         std::fs::write(&path, "broken").unwrap();
         let matches = Args::command()
             .try_get_matches_from([
-                "strata-wrap",
+                "basalt-wrap",
                 "--config",
                 path.to_str().unwrap(),
                 "--no-config",
@@ -488,7 +592,7 @@ mod tests {
         std::fs::write(&path,r#"{"vram":{"min_free_mib":1536,"step_mib":256},"profiles":{"desktop":{"model":"model.json","vram":{"growth_mode":"capacity"}}}}"#).unwrap();
         let matches = Args::command()
             .try_get_matches_from([
-                "strata-wrap",
+                "basalt-wrap",
                 "--config",
                 path.to_str().unwrap(),
                 "--profile",
@@ -514,7 +618,7 @@ mod tests {
         let path = dir.path().join("new/config.json");
         let matches = Args::command()
             .try_get_matches_from([
-                "strata-wrap",
+                "basalt-wrap",
                 "iq3_s",
                 "--setup",
                 "--config",

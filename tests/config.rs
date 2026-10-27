@@ -4,7 +4,7 @@ use std::{
 };
 
 fn run(root: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+    Command::new(env!("CARGO_BIN_EXE_basalt-wrap"))
         .args(args)
         .env("XDG_CONFIG_HOME", root)
         .output()
@@ -14,7 +14,7 @@ fn run(root: &std::path::Path, args: &[&str]) -> Output {
 #[test]
 fn config_commands_validate_and_never_overwrite() {
     let root = tempfile::tempdir().unwrap();
-    let path = root.path().join("strata-wrap/config.json");
+    let path = root.path().join("basalt-wrap/config.json");
     assert!(run(root.path(), &["--init-config"]).status.success());
     let original = fs::read(&path).unwrap();
     assert!(!run(root.path(), &["--init-config"]).status.success());
@@ -50,7 +50,7 @@ fn config_commands_validate_and_never_overwrite() {
 #[test]
 fn saved_theme_is_used_cli_wins_and_preview_preserves_config() {
     let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("strata-wrap");
+    let folder = root.path().join("basalt-wrap");
     fs::create_dir_all(&folder).unwrap();
     let path = folder.join("config.json");
     let config = r#"{"theme":"ember","vram":{"growth_mode":"capacity","step_mib":256}}"#;
@@ -78,9 +78,9 @@ fn doctor_checks_missing_setup_and_completions_need_no_config() {
         root.path(),
         &[
             "--doctor",
-            "--strata-dir",
-            "/nonexistent-strata-wrap-doctor",
-            "/nonexistent-strata-wrap-doctor/model.json",
+            "--basalt-dir",
+            "/nonexistent-basalt-wrap-doctor",
+            "/nonexistent-basalt-wrap-doctor/model.json",
         ],
     );
     assert!(!result.status.success());
@@ -94,9 +94,9 @@ fn doctor_checks_missing_setup_and_completions_need_no_config() {
             .iter()
             .any(|c| c["check"] == "model and policy" && c["ok"] == false)
     );
-    std::fs::create_dir_all(root.path().join("strata-wrap")).unwrap();
-    std::fs::write(root.path().join("strata-wrap/config.json"), "invalid").unwrap();
+    std::fs::create_dir_all(root.path().join("basalt-wrap")).unwrap();
+    std::fs::write(root.path().join("basalt-wrap/config.json"), "invalid").unwrap();
     let completion = run(root.path(), &["--completions", "fish"]);
     assert!(completion.status.success());
-    assert!(String::from_utf8_lossy(&completion.stdout).contains("complete -c strata-wrap"));
+    assert!(String::from_utf8_lossy(&completion.stdout).contains("complete -c basalt-wrap"));
 }

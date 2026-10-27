@@ -24,20 +24,20 @@ pub fn inspect(args: &Args) -> Value {
         })(),
     );
     check(
-        "Strata server",
+        "Basalt server",
         (|| -> Result<String> {
             ensure!(
-                args.strata_dir.join("serve/server.py").is_file(),
+                args.basalt_dir.join("serve/server.py").is_file(),
                 "missing serve/server.py in {}",
-                args.strata_dir.display()
+                args.basalt_dir.display()
             );
-            Ok(args.strata_dir.display().to_string())
+            Ok(args.basalt_dir.display().to_string())
         })(),
     );
     check(
         "Python",
         (|| -> Result<String> {
-            let path = args.strata_dir.join(".venv/bin/python");
+            let path = args.basalt_dir.join(".venv/bin/python");
             let metadata = path.metadata().context("missing .venv/bin/python")?;
             ensure!(
                 metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
@@ -63,23 +63,7 @@ pub fn inspect(args: &Args) -> Value {
     check(
         "native engine",
         (|| -> Result<String> {
-            let model = runtime::read_config(args)?;
-            let cwd = std::path::PathBuf::from(model["cwd"].as_str().unwrap_or("."));
-            let cwd = if cwd.is_absolute() {
-                cwd
-            } else {
-                args.strata_dir.join(cwd)
-            };
-            let exe = std::path::PathBuf::from(
-                model["exe"]
-                    .as_str()
-                    .context("model config needs an exe path")?,
-            );
-            let exe = if exe.is_absolute() {
-                exe
-            } else {
-                cwd.join(exe)
-            };
+            let exe = args.basalt_dir.join("bin/basalt");
             ensure!(
                 exe.is_file()
                     && exe
@@ -95,12 +79,19 @@ pub fn inspect(args: &Args) -> Value {
         })(),
     );
     check(
+        "model file",
+        (|| -> Result<String> {
+            let model = runtime::read_config(args)?;
+            let path = config::model_path(args, &model)?;
+            ensure!(path.is_file(), "model file missing: {}", path.display());
+            Ok(path.display().to_string())
+        })(),
+    );
+    check(
         "server port",
         (|| -> Result<String> {
             let model = runtime::read_config(args)?;
-            let port = args
-                .port
-                .unwrap_or_else(|| model["port"].as_u64().unwrap_or(8080) as u16);
+            let port = config::port(args, &model);
             let busy = std::net::TcpStream::connect_timeout(
                 &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
                 std::time::Duration::from_millis(150),
@@ -160,7 +151,7 @@ pub fn setup(args: &Args) -> Result<i32> {
         .find(|g| g.index.to_string() == gpu_index)
         .context("GPU not found")?;
     let settings = config::Settings {
-        strata_dir: Some(std::path::absolute(&args.strata_dir)?),
+        basalt_dir: Some(std::path::absolute(&args.basalt_dir)?),
         model: Some(
             if matches!(args.model.as_deref(), Some("iq3_s" | "ud-iq3_s")) {
                 args.model.clone().unwrap()

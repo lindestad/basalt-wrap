@@ -28,31 +28,27 @@ impl Fixture {
     fn new(label: &str) -> Self {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
         fs::create_dir(root.join("serve")).unwrap();
         let script = format!(
             "#!/bin/sh\nexec '{}' --ignored --exact fixture_process --nocapture\n",
             std::env::current_exe().unwrap().display()
         );
-        fs::write(root.join(".venv/bin/python"), script).unwrap();
-        fs::set_permissions(
-            root.join(".venv/bin/python"),
-            fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        fs::write(root.join("bin/basalt"), script).unwrap();
+        fs::set_permissions(root.join("bin/basalt"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(
-            root.join("strata-iq3_s.json"),
-            json!({"vram_elastic":true,"port":18089}).to_string(),
+            root.join("basalt-iq3_s.json"),
+            json!({"server":{"port":18089},"engine":{"vram-elastic":true}}).to_string(),
         )
         .unwrap();
-        let unit = format!("strata-wrap-rust-test-{}-{label}", std::process::id());
+        let unit = format!("basalt-wrap-rust-test-{}-{label}", std::process::id());
         let output = fs::File::create(root.join("output.log")).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+        let child = Command::new(env!("CARGO_BIN_EXE_basalt-wrap"))
             .arg("iq3_s")
-            .arg("--strata-dir")
+            .arg("--basalt-dir")
             .arg(root)
             .args(["--unit", &unit, "--plain", "--no-config"])
-            .env("STRATA_WRAP_FIXTURE_ROOT", root)
+            .env("BASALT_WRAP_FIXTURE_ROOT", root)
             .env("XDG_STATE_HOME", root.join("state"))
             .stdin(Stdio::null())
             .stdout(output.try_clone().unwrap())
@@ -111,7 +107,7 @@ impl Fixture {
                     .unwrap_or_else(|| format!("/run/user/{}", unsafe { libc::getuid() }).into());
                 let _ = fs::remove_file(
                     runtime
-                        .join("strata-wrap")
+                        .join("basalt-wrap")
                         .join(format!("{}.service.sock", self.unit)),
                 );
                 return;
@@ -170,7 +166,7 @@ fn lifecycle_cleanup_and_console() {
         let mut f = Fixture::new("attach");
         let broken = f.temp.path().join("broken.json");
         fs::write(&broken, "broken").unwrap();
-        let diagnosis = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+        let diagnosis = Command::new(env!("CARGO_BIN_EXE_basalt-wrap"))
             .args(["--diagnose", "--unit", &f.unit, "--config"])
             .arg(&broken)
             .output()
@@ -183,7 +179,7 @@ fn lifecycle_cleanup_and_console() {
         let status: Value = serde_json::from_slice(&diagnosis.stdout).unwrap();
         assert_eq!(status["source"], "running-worker");
         assert_eq!(status["effective"]["step_mib"], 512);
-        let mut attached = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
+        let mut attached = Command::new(env!("CARGO_BIN_EXE_basalt-wrap"))
             .args(["--attach", "--unit", &f.unit, "--plain", "--no-config"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -210,8 +206,8 @@ fn lifecycle_cleanup_and_console() {
     }
     {
         let mut f = Fixture::new("duplicate");
-        let duplicate = Command::new(env!("CARGO_BIN_EXE_strata-wrap"))
-            .args(["iq3_s", "--strata-dir"])
+        let duplicate = Command::new(env!("CARGO_BIN_EXE_basalt-wrap"))
+            .args(["iq3_s", "--basalt-dir"])
             .arg(f.temp.path())
             .args(["--unit", &f.unit, "--plain", "--no-config"])
             .output()
@@ -226,7 +222,7 @@ fn lifecycle_cleanup_and_console() {
 #[test]
 #[ignore = "child fixture launched only by lifecycle tests"]
 fn fixture_process() {
-    let Some(root) = std::env::var_os("STRATA_WRAP_FIXTURE_ROOT") else {
+    let Some(root) = std::env::var_os("BASALT_WRAP_FIXTURE_ROOT") else {
         return;
     };
     let root = Path::new(&root);
@@ -249,7 +245,7 @@ fn fixture_process() {
     let server = tiny_http::Server::http("127.0.0.1:18089").unwrap();
     for request in server.incoming_requests() {
         let data = if request.url() == "/v1/status" {
-            json!({"service":"strata","loaded":true,"started":1,"activity":{"requests":0,"in_flight":0},"vram":{"elastic":true}})
+            json!({"service":"basalt","loaded":true,"started":1,"activity":{"requests":0,"in_flight":0},"vram":{"elastic":true}})
         } else {
             json!({"engine":{"model":"fake","expert_cache_mib":100},"live":{"state":"idle"},"requests":[],"totals":{}})
         };
@@ -266,17 +262,17 @@ fn fixture_process() {
 fn installer_preserves_local_settings() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
-    fs::create_dir_all(home.join("apps/Strata")).unwrap();
+    fs::create_dir_all(home.join("apps/basalt")).unwrap();
     fs::create_dir_all(home.join(".config/fish")).unwrap();
-    for model in ["iq3_s", "ud-iq3_s"] {
-        fs::write(home.join(format!("apps/Strata/strata-{model}.json")),json!({"api_key":"test-only","pricing":{"prompt":0.1},"args":["--max-context","196608"]}).to_string()).unwrap();
-    }
+    let model_path = home.join("apps/basalt/basalt-iq3_s.json");
+    let original = json!({"server":{"model":"model.basalt"},"engine":{"kv":"int8"}}).to_string();
+    fs::write(&model_path, &original).unwrap();
     fs::write(
         home.join(".config/fish/.config.local.fish"),
         "# local\nabbr --add sa 'old'\nabbr --add saud 'old-ud'\nset keep untouched\n",
     )
     .unwrap();
-    let exe = env!("CARGO_BIN_EXE_strata-wrap");
+    let exe = env!("CARGO_BIN_EXE_basalt-wrap");
     let status = Command::new(exe)
         .arg("install")
         .env("HOME", home)
@@ -287,25 +283,18 @@ fn installer_preserves_local_settings() {
         "{}",
         String::from_utf8_lossy(&status.stderr)
     );
-    for model in ["iq3_s", "ud-iq3_s"] {
-        let data: Value = serde_json::from_slice(
-            &fs::read(home.join(format!("apps/Strata/strata-{model}.json"))).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(data["api_key"], "test-only");
-        assert_eq!(data["pricing"]["prompt"], 0.1);
-        assert_eq!(data["vram_elastic"], true);
-        assert_eq!(data["vram_segment_mib"], 512);
-    }
+    assert_eq!(fs::read_to_string(model_path).unwrap(), original);
     let fish = fs::read_to_string(home.join(".config/fish/.config.local.fish")).unwrap();
-    assert!(fish.contains("set keep untouched"));
-    assert!(fish.contains("strata-wrap ud-iq3_s"));
-    assert!(home.join(".local/bin/strata-wrap").is_symlink());
     assert_eq!(
-        fs::read_link(home.join(".local/bin/strata-wrap")).unwrap(),
+        fish,
+        "# local\nabbr --add sa 'old'\nabbr --add saud 'old-ud'\nset keep untouched\n"
+    );
+    assert!(home.join(".local/bin/basalt-wrap").is_symlink());
+    assert_eq!(
+        fs::read_link(home.join(".local/bin/basalt-wrap")).unwrap(),
         Path::new(exe)
     );
-    let output = Command::new(home.join(".local/bin/strata-wrap"))
+    let output = Command::new(home.join(".local/bin/basalt-wrap"))
         .arg("--list-themes")
         .output()
         .unwrap();

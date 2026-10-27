@@ -2,5 +2,7 @@ target/
 .env
 .env.*
 *.log
-strata-*.json
+basalt-*.json
 preferences.json
+local.json
+local-model.json

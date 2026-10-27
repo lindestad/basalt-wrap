@@ -45,13 +45,8 @@ impl Drop for Runner<'_> {
 
 pub fn launch(args: &Args) -> Result<i32> {
     let config = runtime::read_config(args)?;
-    let port = args
-        .port
-        .unwrap_or_else(|| config["port"].as_u64().unwrap_or(8080) as u16);
-    let mut app = App::new(
-        config["model_name"].as_str().unwrap_or("Strata").into(),
-        port,
-    );
+    let port = crate::config::port(args, &config);
+    let mut app = App::new(crate::config::model_name(&config).into(), port);
     app.min_free_mib = args.min_free_mib;
     app.grow_below_mib = args.grow_below_mib;
     app.step_mib = args.step_mib;
@@ -163,7 +158,7 @@ pub fn launch(args: &Args) -> Result<i32> {
         }
     }
     println!(
-        "Strata stopped · {} requests · {} input · {} output · {:.1} tok/s active average",
+        "Basalt stopped · {} requests · {} input · {} output · {:.1} tok/s active average",
         total.requests,
         ui::commas(total.input),
         ui::commas(total.output),
@@ -270,7 +265,7 @@ pub fn key_action(app: &mut App, key: KeyCode) {
                     [(index + theme::Theme::ALL.len() - 1) % theme::Theme::ALL.len()];
                 app.theme_notice = None;
             }
-            KeyCode::Home | KeyCode::Char('g') => app.theme = theme::Theme::Strata,
+            KeyCode::Home | KeyCode::Char('g') => app.theme = theme::Theme::Basalt,
             KeyCode::End | KeyCode::Char('G') => app.theme = *theme::Theme::ALL.last().unwrap(),
             KeyCode::Esc | KeyCode::Char('t') => {
                 app.theme = original;
@@ -505,7 +500,7 @@ fn configure_theme(app: &mut App, args: &Args) {
         theme::Theme::default()
     } else {
         theme::load(&path).unwrap_or_else(|error| {
-            app.theme_notice = Some(format!("Saved theme unavailable: {error}. Using Strata."));
+            app.theme_notice = Some(format!("Saved theme unavailable: {error}. Using Basalt."));
             theme::Theme::default()
         })
     };
@@ -601,16 +596,11 @@ pub fn attach(args: &Args) -> Result<i32> {
         let mut resolved = args.clone();
         let model = runtime::read_config(args)?;
         crate::config::resolve_model(&mut resolved, &model)?;
-        let port = args
-            .port
-            .unwrap_or_else(|| model["port"].as_u64().unwrap_or(8080) as u16);
+        let port = crate::config::port(args, &model);
         app.address = format!("127.0.0.1:{port}");
         app.policy = "Read-only attachment · external policy unknown".into();
         (
-            Some(runtime::Api::new(
-                port,
-                model["api_key"].as_str().unwrap_or(""),
-            )?),
+            Some(runtime::Api::new(port, &runtime::api_key())?),
             resolved.gpu.as_deref().unwrap_or("0").parse()?,
         )
     };
@@ -746,7 +736,7 @@ mod tests {
         assert_eq!(app.process_offset, 0);
         assert!(!path.exists());
         key(&mut app, KeyCode::Esc);
-        assert_eq!(app.theme, theme::Theme::Strata);
+        assert_eq!(app.theme, theme::Theme::Basalt);
         assert!(app.theme_picker.is_none());
         assert!(!path.exists());
         key(&mut app, KeyCode::Char('t'));
@@ -760,7 +750,7 @@ mod tests {
     #[test]
     fn preview_never_saves_preferences_and_accepts_cli_palette() {
         let args =
-            <Args as clap::Parser>::parse_from(["strata-wrap", "--preview", "--theme", "ember"]);
+            <Args as clap::Parser>::parse_from(["basalt-wrap", "--preview", "--theme", "ember"]);
         assert!(args.demo);
         let mut app = model::demo();
         configure_theme(&mut app, &args);
@@ -784,7 +774,7 @@ mod tests {
         key(&mut app, KeyCode::Char('h'));
         assert_eq!(app.theme, theme::Theme::AyuDark);
         key(&mut app, KeyCode::Home);
-        assert_eq!(app.theme, theme::Theme::Strata);
+        assert_eq!(app.theme, theme::Theme::Basalt);
         key(&mut app, KeyCode::Char('k'));
         assert_eq!(app.theme, theme::Theme::Everforest);
         key(&mut app, KeyCode::Enter);
@@ -810,7 +800,7 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid json");
         key(&mut app, KeyCode::Esc);
-        assert_eq!(app.theme, theme::Theme::Strata);
+        assert_eq!(app.theme, theme::Theme::Basalt);
     }
     #[test]
     fn vim_views_selection_and_gg_g() {
