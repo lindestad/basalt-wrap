@@ -503,6 +503,14 @@ impl App {
             }
             Event::Metrics(mut metrics) => {
                 metrics.observe(&self.metrics.session);
+                // The session began when the server did, not when this wrapper connected to it.
+                let started = number(&metrics.status, "/started");
+                if started > 0.0 {
+                    self.started = Instant::now()
+                        - std::time::Duration::from_secs_f64(
+                            (epoch() - started).clamp(0., 2_592_000.),
+                        );
+                }
                 let new_entry = self.metrics.last()["time"] != metrics.last()["time"];
                 if new_entry
                     || self.age_updated.elapsed().as_secs() >= if self.age_seconds { 1 } else { 30 }
@@ -675,7 +683,7 @@ pub fn demo() -> App {
             "slots":{"total":2,"active":1,"queue_depth":1}},
         "requests":requests,
         "hardware":{"gpu_pcie_rx_mb":4782.0,"gpu_pcie_gen":5,"gpu_pcie_width":16,"disk_read_mb":148.2,"disk_write_mb":4.6}}),
-        json!({"model":app.model,"loaded":true,"engine":"0.1.44.1","started":1780000000,
+        json!({"model":app.model,"loaded":true,"engine":"0.1.44.1","started":epoch() - 780.0,
             "activity":{"requests":9,"in_flight":1,"last_request_at":1780000360},
             "vram":{"elastic":true,"expert_cache_mib":6144,"expert_cache_full_mib":7680,"expert_slots":3095}}),
         json!([{"id":0,"state":"decoding","generated":684,"max_tokens":2048,"prompt_tokens":18432,
@@ -897,6 +905,19 @@ mod tests {
         assert!((m.totals().decode_seconds - 10.0).abs() < 0.001);
         // The table covers every running request, so nothing is a floor here.
         assert!(!m.totals().partial);
+    }
+
+    #[test]
+    fn the_session_clock_follows_the_server_not_the_wrapper() {
+        // an attachment starts minutes after the server it joins
+        let mut app = App::new("m".into(), 8080);
+        app.apply(Event::Metrics(Box::new(Metrics::new(
+            json!({"live": {"state": "idle"}, "requests": []}),
+            json!({"started": epoch() - 120.0, "activity": {"requests": 0, "in_flight": 0}}),
+            Value::Null,
+        ))));
+        let elapsed = app.started.elapsed().as_secs_f64();
+        assert!((elapsed - 120.0).abs() < 5.0, "session showed {elapsed}s");
     }
 
     #[test]

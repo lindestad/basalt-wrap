@@ -60,13 +60,17 @@ pub struct Log {
     file: Mutex<File>,
 }
 impl Log {
-    pub fn new(model: &str) -> Result<Self> {
-        let dir = std::env::var_os("XDG_STATE_HOME")
+    /// The worker's log file for a model config's stem, shared with attachments that tail it.
+    pub fn path(model: &str) -> PathBuf {
+        std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| crate::home().join(".local/state"))
-            .join("basalt-wrap");
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{model}.log"));
+            .join("basalt-wrap")
+            .join(format!("{model}.log"))
+    }
+    pub fn new(model: &str) -> Result<Self> {
+        let path = Self::path(model);
+        fs::create_dir_all(path.parent().context("log path needs a directory")?)?;
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
@@ -106,6 +110,59 @@ impl Log {
             message: message.into(),
             raw,
         });
+    }
+}
+
+/// An attachment's view of the worker's log: reads what was appended since the last poll.
+/// The worker rotates the file at a size cap, so a shrink restarts at the newest bytes
+/// rather than replaying the archive; the first read shows the end of the file, like `tail`.
+pub struct LogTailer {
+    path: PathBuf,
+    offset: u64,
+}
+impl LogTailer {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            offset: u64::MAX,
+        }
+    }
+    /// Whole lines added since the previous call, each with the server/wrapper marker split off.
+    pub fn since(&mut self) -> Vec<(String, bool)> {
+        let Ok(all) = fs::read(&self.path) else {
+            return Vec::new();
+        };
+        let len = all.len() as u64;
+        if len < self.offset {
+            // first read, or the file was rotated: start near the end, on a line boundary
+            let start = len.saturating_sub(64 * 1024);
+            self.offset = if start == 0 {
+                0
+            } else {
+                match all[start as usize..].iter().position(|b| *b == b'\n') {
+                    Some(p) => start + p as u64 + 1, // drop the partial line the window opens on
+                    None => len,
+                }
+            };
+        }
+        let fresh = &all[self.offset as usize..];
+        let Some(end) = fresh.iter().rposition(|b| *b == b'\n') else {
+            return Vec::new(); // no complete line yet
+        };
+        self.offset += end as u64 + 1;
+        String::from_utf8_lossy(&fresh[..=end])
+            .lines()
+            .map(|line| {
+                let (_, rest) = line.split_once(' ').unwrap_or(("", line));
+                match rest.strip_prefix("[server] ") {
+                    Some(msg) => (msg.to_owned(), true),
+                    None => (
+                        rest.strip_prefix("[wrapper] ").unwrap_or(rest).to_owned(),
+                        false,
+                    ),
+                }
+            })
+            .collect()
     }
 }
 
@@ -1142,6 +1199,40 @@ mod tests {
         assert_eq!(worker.grow_delay, 70.);
         assert_eq!(worker.poll, 3.);
     }
+    #[test]
+    fn log_tailer_follows_appends_and_skips_rotated_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.log");
+        std::fs::write(
+            &path,
+            "1700 [server] first\n1701 [wrapper] second\n1702 [server] par",
+        )
+        .unwrap();
+        let mut tail = LogTailer::new(path.clone());
+        let first = tail.since();
+        assert_eq!(
+            first,
+            vec![("first".to_string(), true), ("second".to_string(), false),],
+            "the partial trailing line waits for its newline"
+        );
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"tial\n1703 [server] done\n")
+            .unwrap();
+        assert_eq!(
+            tail.since(),
+            vec![("partial".to_string(), true), ("done".to_string(), true)]
+        );
+        // rotation: a fresh small file shows only its own newest lines
+        std::fs::write(&path, "1704 [wrapper] rotated\n").unwrap();
+        assert_eq!(tail.since(), vec![("rotated".to_string(), false)]);
+        // a missing file is simply quiet
+        std::fs::remove_file(&path).unwrap();
+        assert!(tail.since().is_empty());
+    }
+
     #[test]
     fn worker_resize_path_handles_busy_inference_staleness_and_pressure_while_pending() {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();

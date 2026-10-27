@@ -8,4 +8,6 @@
 - Read API credentials from `BASALT_WRAP_API_KEY` for server launch and monitoring.
 - Sum session tokens and decode time across polls: Basalt lists only its recent requests and gives a decode rate instead of a decode duration.
 - Poll Basalt's `/slots` table so the `Now` panel's progress bar fills through prefill and decode instead of only counting elapsed time.
+- Read the conversation cache budget as GiB and show the quantization on its own line; the values were clipped or mis-scaled at typical panel widths.
+- Count the session from the server's start, not the wrapper's, so an attachment shows the session it joined; follow the running server's log from an attachment, over the worker's file or the server's `/api/logs`.
 - Make installation link only the launcher, preserving model configs and shell bindings.

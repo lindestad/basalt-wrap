@@ -66,6 +66,17 @@ fn compact(n: u64) -> String {
 fn gib(n: u64) -> String {
     format!("{:.1}", n as f64 / 1073741824.)
 }
+/// A MiB figure as GiB, dropping the decimals when it is a whole number of them.
+/// The engine reports a conversation cache of zero when the cache is off.
+fn mib(n: u64) -> String {
+    if n == 0 {
+        "off".into()
+    } else if n.is_multiple_of(1024) {
+        format!("{} GiB", n / 1024)
+    } else {
+        format!("{:.1} GiB", n as f64 / 1024.)
+    }
+}
 fn opt_gib(n: Option<u64>) -> String {
     n.map(|n| format!("{} GiB", gib(n)))
         .unwrap_or_else(|| "—".into())
@@ -906,9 +917,9 @@ impl Ui {
             inner,
             10,
             Line::from(self.dim(format!(
-                "Conversation cache · {} budget · {} slots",
-                compact(number(engine, "/conversation_cache_mib") as u64),
-                number(engine, "/conversation_cache_slots")
+                "Conversation cache · {} · {} slots",
+                mib(number(engine, "/conversation_cache_mib") as u64),
+                number(engine, "/conversation_cache_slots") as u64
             ))),
         );
         line(
@@ -917,8 +928,13 @@ impl Ui {
             11,
             Line::from(vec![
                 self.dim("Engine "),
+                // the version rides in the header; the panel has room for the quantization alone
                 value(
-                    format!("{} · {}", text(engine, "/engine"), text(engine, "/quant")),
+                    [text(engine, "/quant"), text(engine, "/version")]
+                        .into_iter()
+                        .find(|s| !s.is_empty())
+                        .unwrap_or("unknown")
+                        .to_string(),
                     self.palette.fg,
                 ),
             ]),
@@ -1618,6 +1634,44 @@ fn rgb(color: Color, fallback: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mib_formats_whole_gibibytes_without_decimals() {
+        assert_eq!(mib(16384), "16 GiB");
+        assert_eq!(mib(6144), "6 GiB");
+        assert_eq!(mib(1500), "1.5 GiB");
+        assert_eq!(mib(0), "off");
+    }
+
+    #[test]
+    fn the_cache_panel_fits_the_engine_it_reports() {
+        // what a live basalt engine sends: a MiB budget and a long quantization name
+        let mut app = crate::model::App::new("m".into(), 8080);
+        app.connected = true;
+        app.apply(crate::model::Event::Metrics(Box::new(
+            crate::model::Metrics::new(
+                json!({"engine":{"model":"m","max_context":262144,"version":"0.0.1",
+                        "kv":"int8","kv_resident":20480,"expert_slots":3660,
+                        "conversation_cache_mib":16384,"conversation_cache_slots":6,
+                        "quant":"Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"},
+                       "live":{"state":"idle","slots":{"total":1,"active":0,"queue_depth":0}},
+                       "requests":[]}),
+                json!({"loaded":true,"activity":{"requests":0,"in_flight":0},
+                       "vram":{"expert_cache_mib":7168,"expert_cache_full_mib":7328}}),
+                serde_json::Value::Null,
+            ),
+        )));
+        let text = snapshot(&app, 120, 40, false).unwrap();
+        assert!(
+            text.contains("Conversation cache · 16 GiB · 6 slots"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Engine Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S"),
+            "{text}"
+        );
+        assert!(!text.contains("16.4k"), "{text}");
+    }
+
     #[test]
     fn theme_picker_keeps_last_palette_visible_in_a_short_terminal() {
         let mut app = crate::model::demo();

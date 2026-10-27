@@ -608,9 +608,19 @@ pub fn attach(args: &Args) -> Result<i32> {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
     let settings = args.clone();
+    // Logs reach an attachment two ways: the worker's own file, tailed from disk, or the
+    // server's log ring over /api/logs when no wrapper worker owns the server.
+    let log_stem = args
+        .config()
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("basalt")
+        .to_owned();
     thread::spawn(move || {
         let mut collector = Collector::new(gpu);
         collector.external = true;
+        let mut tailer = managed.then(|| runtime::LogTailer::new(runtime::Log::path(&log_stem)));
+        let mut log_after: u64 = 0;
         while !flag.load(Ordering::Relaxed) {
             let result = (|| -> Result<Vec<Event>> {
                 if managed {
@@ -628,17 +638,34 @@ pub fn attach(args: &Args) -> Result<i32> {
                         events.push(Event::Hardware(Box::new(hardware.clone())));
                     }
                     events.push(Event::Supervisor(Box::new(snapshot)));
+                    if let Some(tailer) = &mut tailer {
+                        for (message, raw) in tailer.since() {
+                            events.push(Event::Log { message, raw });
+                        }
+                    }
                     Ok(events)
                 } else {
                     let api = api.as_ref().unwrap();
-                    Ok(vec![
+                    let mut events = vec![
                         Event::Metrics(Box::new(model::Metrics::new(
                             api.get("/metrics")?,
                             api.get("/v1/status")?,
                             api.get("/slots").unwrap_or(serde_json::Value::Null),
                         ))),
                         Event::Hardware(Box::new(collector.sample())),
-                    ])
+                    ];
+                    if let Ok(logs) = api.get(&format!("/api/logs?after={log_after}&limit=50")) {
+                        log_after = logs["last"].as_u64().unwrap_or(log_after);
+                        if let Some(rows) = logs["lines"].as_array() {
+                            for row in rows {
+                                events.push(Event::Log {
+                                    message: model::text(row, "/msg").to_owned(),
+                                    raw: false,
+                                });
+                            }
+                        }
+                    }
+                    Ok(events)
                 }
             })();
             match result {
