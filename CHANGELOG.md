@@ -7,4 +7,5 @@
 - Use separate settings, logs, control sockets, and systemd units.
 - Read API credentials from `BASALT_WRAP_API_KEY` for server launch and monitoring.
 - Sum session tokens and decode time across polls: Basalt lists only its recent requests and gives a decode rate instead of a decode duration.
+- Poll Basalt's `/slots` table so the `Now` panel's progress bar fills through prefill and decode instead of only counting elapsed time.
 - Make installation link only the launcher, preserving model configs and shell bindings.

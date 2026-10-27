@@ -246,8 +246,12 @@ fn fixture_process() {
     for request in server.incoming_requests() {
         let data = if request.url() == "/v1/status" {
             json!({"service":"basalt","loaded":true,"started":1,"activity":{"requests":0,"in_flight":0},"vram":{"elastic":true}})
+        } else if request.url() == "/slots" {
+            json!([{"id":0,"state":"idle","generated":0,"max_tokens":null,"prompt_tokens":0,
+                "prefill_done":null,"tok_s":0.0,"ctx_used":0}])
         } else {
-            json!({"engine":{"model":"fake","expert_cache_mib":100},"live":{"state":"idle"},"requests":[],"totals":{}})
+            json!({"engine":{"model":"fake","expert_cache_mib":100},"live":{"state":"idle",
+                "slots":{"total":1,"active":0,"queue_depth":0}},"requests":[]})
         };
         let _ = request.respond(
             tiny_http::Response::from_string(data.to_string()).with_header(

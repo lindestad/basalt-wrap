@@ -71,6 +71,11 @@ pub fn request_number(request: &Value) -> Option<u64> {
 pub struct Metrics {
     pub data: Value,
     pub status: Value,
+    /// Basalt's per-slot rows from `/slots`. The `/metrics` live block names the newest request
+    /// but leaves out how far its prompt has been read and how many tokens it may produce, and
+    /// those two are what the progress bars need.
+    #[serde(default)]
+    pub slots: Value,
     /// What the wrapper has counted of this server's session. Basalt's `/metrics` lists only
     /// its recent finished requests, so the session's sums ride along from poll to poll.
     #[serde(default)]
@@ -78,12 +83,64 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn new(data: Value, status: Value) -> Self {
+    pub fn new(data: Value, status: Value, slots: Value) -> Self {
         Self {
             data,
             status,
+            slots,
             session: Session::default(),
         }
+    }
+
+    /// The slots holding a request that is reading or decoding.
+    pub fn active_slots(&self) -> Vec<&Value> {
+        self.slots
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| text(row, "/state") != "idle")
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Prompt tokens read and prompt length, summed over the reading slots. `None` while the
+    /// engine has not sent a progress line yet.
+    pub fn prefill_progress(&self) -> Option<(f64, f64)> {
+        let rows: Vec<&Value> = self
+            .active_slots()
+            .into_iter()
+            .filter(|row| text(row, "/state") == "prefill")
+            .filter(|row| row.get("prefill_done").and_then(Value::as_f64).is_some())
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        Some(rows.into_iter().fold((0., 0.), |(done, total), row| {
+            (
+                done + number(row, "/prefill_done"),
+                total + number(row, "/prompt_tokens"),
+            )
+        }))
+    }
+
+    /// Tokens generated and their cap, summed over the decoding slots.
+    pub fn decode_progress(&self) -> Option<(f64, f64)> {
+        let rows: Vec<&Value> = self
+            .active_slots()
+            .into_iter()
+            .filter(|row| text(row, "/state") == "decoding")
+            .filter(|row| number(row, "/max_tokens") > 0.)
+            .collect();
+        if rows.is_empty() {
+            return None;
+        }
+        Some(rows.into_iter().fold((0., 0.), |(generated, max), row| {
+            (
+                generated + number(row, "/generated"),
+                max + number(row, "/max_tokens"),
+            )
+        }))
     }
 
     /// Carry the counts from the previous poll and add the finished requests of this one.
@@ -133,7 +190,25 @@ impl Metrics {
     pub fn totals(&self) -> Totals {
         let session = self.session_counts();
         let active = self.busy();
-        let (generated, live_input, live_seconds) = if active {
+        let live = self.active_slots();
+        let slotted = !live.is_empty();
+        let (generated, live_input, live_seconds) = if slotted {
+            live.into_iter()
+                .fold((0., 0., 0.), |(out, input, seconds), row| {
+                    let generated = number(row, "/generated");
+                    let rate = number(row, "/tok_s");
+                    (
+                        out + generated,
+                        input + number(row, "/prompt_tokens"),
+                        seconds
+                            + if generated > 0. && rate > 0. {
+                                generated / rate
+                            } else {
+                                0.
+                            },
+                    )
+                })
+        } else if active {
             let generated = number(&self.data, "/live/generated");
             let mean = number(&self.data, "/live/tok_s_mean");
             let rate = if mean > 0. {
@@ -162,13 +237,13 @@ impl Metrics {
         } else {
             session.last - session.first + 1 - session.requests
         };
+        // Without the slot table the live numbers only cover the newest request, so a session
+        // running several at once is a floor while they do.
+        let unslotted = !slotted && number(&self.data, "/live/slots/active") > 1.;
         let seconds = session.decode_seconds + live_seconds;
         let rate_tokens = session.output as f64 + if live_seconds > 0.0 { generated } else { 0.0 };
         Totals {
-            partial: gaps > 0
-                || session.first > 1
-                || finished > session.last
-                || number(&self.data, "/live/slots/active") > 1.,
+            partial: gaps > 0 || session.first > 1 || finished > session.last || unslotted,
             input: session.input + live_input as u64,
             output: session.output + generated as u64,
             reused: session.reused,
@@ -261,7 +336,7 @@ pub enum Event {
         preview: bool,
         result: Result<Value, String>,
     },
-    Metrics(Metrics),
+    Metrics(Box<Metrics>),
     Hardware(Box<Hardware>),
     Log {
         message: String,
@@ -460,7 +535,7 @@ impl App {
                 };
                 self.tps.push_back((speed * 10.0) as u64);
                 RingLimit::truncate_front(&mut self.tps, 120);
-                self.metrics = metrics;
+                self.metrics = *metrics;
                 self.connected = true;
                 self.updated = Some(Instant::now());
             }
@@ -592,7 +667,7 @@ pub fn demo() -> App {
             "duration_s":32.4+i as f64*3.0,"prompt_ms":2430.0,"hit_rate":0.684,"pcie_share":0.2,
             "finish":"stop","drafts_offered":1500,"drafts_accepted":1194}));
     }
-    app.apply(Event::Metrics(Metrics::new(json!({"engine":{"model":app.model,"max_context":196608,
+    app.apply(Event::Metrics(Box::new(Metrics::new(json!({"engine":{"model":app.model,"max_context":196608,
         "expert_cache_mib":6144,"expert_slots":3095,"kv":"k8v4","kv_resident":20480,
         "spec":4,"version":"0.1.44.1","conversation_cache_mib":12288,"conversation_cache_slots":4},
         "live":{"state":"generating","prompt_tokens":18432,"generated":684,
@@ -602,7 +677,11 @@ pub fn demo() -> App {
         "hardware":{"gpu_pcie_rx_mb":4782.0,"gpu_pcie_gen":5,"gpu_pcie_width":16,"disk_read_mb":148.2,"disk_write_mb":4.6}}),
         json!({"model":app.model,"loaded":true,"engine":"0.1.44.1","started":1780000000,
             "activity":{"requests":9,"in_flight":1,"last_request_at":1780000360},
-            "vram":{"elastic":true,"expert_cache_mib":6144,"expert_cache_full_mib":7680,"expert_slots":3095}}))));
+            "vram":{"elastic":true,"expert_cache_mib":6144,"expert_cache_full_mib":7680,"expert_slots":3095}}),
+        json!([{"id":0,"state":"decoding","generated":684,"max_tokens":2048,"prompt_tokens":18432,
+            "prefill_done":18432,"tok_s":44.8,"ctx_used":19116},
+            {"id":1,"state":"idle","generated":0,"max_tokens":null,"prompt_tokens":0,
+            "prefill_done":null,"tok_s":0.0,"ctx_used":0}])))));
     app.hardware = Hardware::demo();
     app.policy = "Holding · inference active".into();
     for i in 0..90 {
@@ -672,6 +751,7 @@ mod tests {
             json!({"requests":[{"id":"r_0001","prompt_tokens":4000,"output_tokens":300,
                 "decode_tok_s":30.0,"prompt_ms":90000}],"live":{"state":"idle"}}),
             json!({"started":1780000000,"activity":{"requests":1,"in_flight":0}}),
+            Value::Null,
         );
         assert_eq!(m.totals().tps, 30.0);
         m.data["live"]["elapsed_s"] = json!(1000000);
@@ -716,6 +796,7 @@ mod tests {
                 {"id":"r_0001","prompt_tokens":1000,"output_tokens":100,"decode_tok_s":20.0}],
                 "live":{"state":"idle"}}),
             json!({"started":1780000000,"activity":{"requests":2,"in_flight":0}}),
+            Value::Null,
         );
         assert_eq!(m.totals().requests, 2);
         assert_eq!(m.totals().input, 3000);
@@ -732,6 +813,7 @@ mod tests {
             json!({"requests":[{"id":"r_0006","prompt_tokens":100,"output_tokens":50,
                 "decode_tok_s":25.0}],"live":{"state":"idle"}}),
             json!({"started":1780000000,"activity":{"requests":6,"in_flight":0}}),
+            Value::Null,
         );
         assert_eq!(late.totals().requests, 6);
         assert!(late.totals().partial);
@@ -765,6 +847,7 @@ mod tests {
                 "generated":null,"elapsed_s":null,"tok_s":null,"prefill_tok_s_mean":null}}),
             json!({"service":"basalt","loaded":true,"started":1793098687,
                 "activity":{"requests":3,"in_flight":0,"last_request_at":1793098731}}),
+            json!([]),
         );
         let totals = m.totals();
         assert_eq!(totals.requests, 3);
@@ -777,20 +860,60 @@ mod tests {
     }
 
     #[test]
+    fn slot_rows_fill_the_progress_bars() {
+        // Basalt keeps the prompt position and the token cap on `/slots`, not in `/metrics`.
+        let mut m = Metrics::new(
+            json!({"live":{"state":"reading","prompt_tokens":5264,"generated":null,"tok_s":null,
+                "elapsed_s":2.4,"queued":0,"slots":{"total":1,"active":1,"queue_depth":0}}}),
+            json!({"started":1793098687,"activity":{"requests":0,"in_flight":1}}),
+            json!([{"id":0,"state":"prefill","prefill_done":2519,"prompt_tokens":5264,
+                "generated":0,"max_tokens":4,"tok_s":0.0}]),
+        );
+        assert_eq!(m.prefill_progress(), Some((2519.0, 5264.0)));
+        assert_eq!(m.decode_progress(), None);
+        // A prompt being read is not decode time, but its tokens count.
+        assert_eq!(m.totals().decode_seconds, 0.0);
+        assert_eq!(m.totals().input, 5264);
+        m.slots = json!([{"id":0,"state":"decoding","prefill_done":null,"prompt_tokens":5264,
+            "generated":120,"max_tokens":2048,"tok_s":44.8}]);
+        assert_eq!(m.prefill_progress(), None);
+        assert_eq!(m.decode_progress(), Some((120.0, 2048.0)));
+        assert!((m.totals().decode_seconds - 120.0 / 44.8).abs() < 0.001);
+    }
+
+    #[test]
+    fn several_live_slots_count_once_toward_the_session() {
+        let m = Metrics::new(
+            json!({"live":{"state":"generating","generated":100,"tok_s":50,"prompt_tokens":1000,
+                "queued":0,"slots":{"total":2,"active":2,"queue_depth":0}}}),
+            json!({"started":1793098687,"activity":{"requests":0,"in_flight":2}}),
+            json!([{"id":0,"state":"decoding","generated":100,"max_tokens":512,
+                    "prompt_tokens":1000,"tok_s":50.0},
+                {"id":1,"state":"decoding","generated":200,"max_tokens":512,
+                    "prompt_tokens":2000,"tok_s":25.0}]),
+        );
+        assert_eq!(m.totals().output, 300);
+        assert_eq!(m.totals().input, 3000);
+        assert!((m.totals().decode_seconds - 10.0).abs() < 0.001);
+        // The table covers every running request, so nothing is a floor here.
+        assert!(!m.totals().partial);
+    }
+
+    #[test]
     fn request_ages_only_refresh_on_entry_or_interval() {
         let mut app = demo();
         let metrics = app.metrics.clone();
         app.age_now = 100.;
         app.age_updated = Instant::now();
-        app.apply(Event::Metrics(metrics.clone()));
+        app.apply(Event::Metrics(Box::new(metrics.clone())));
         assert_eq!(app.age_now, 100.);
         app.age_updated = Instant::now() - std::time::Duration::from_secs(31);
-        app.apply(Event::Metrics(metrics.clone()));
+        app.apply(Event::Metrics(Box::new(metrics.clone())));
         assert!(app.age_now > 100.);
         app.age_now = 100.;
         let mut next = metrics;
         next.data["requests"][0]["time"] = json!(1.);
-        app.apply(Event::Metrics(next));
+        app.apply(Event::Metrics(Box::new(next)));
         assert!(app.age_now > 100.);
     }
 }

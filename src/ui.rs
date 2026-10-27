@@ -454,45 +454,50 @@ impl Ui {
         } else if !app.connected {
             app.loading_note.clone()
         } else if state == "reading" {
-            let total = number(data, "/live/prompt_total").max(number(data, "/live/prompt_tokens"));
-            let read = number(data, "/live/prompt_read");
-            if read > 0. {
-                format!(
+            match app.metrics.prefill_progress() {
+                Some((done, total)) => format!(
                     "Reading prompt  {} / {} tokens  ·  {:.1}s",
-                    commas(read as u64),
+                    commas(done as u64),
                     commas(total as u64),
                     number(data, "/live/elapsed_s")
-                )
-            } else {
-                format!(
+                ),
+                None => format!(
                     "Reading prompt  {} tokens  ·  {:.1}s",
-                    commas(total as u64),
+                    commas(number(data, "/live/prompt_tokens") as u64),
                     number(data, "/live/elapsed_s")
-                )
+                ),
             }
         } else if state == "generating" {
-            format!(
-                "Generating  {} tokens  ·  {:.1} tok/s  ·  {:.1}s  ·  {} queued",
-                commas(number(data, "/live/generated") as u64),
-                number(data, "/live/tok_s"),
-                number(data, "/live/elapsed_s"),
-                number(data, "/live/queued")
-            )
+            match app.metrics.decode_progress() {
+                Some((generated, max)) => format!(
+                    "Generating  {} / {} tokens  ·  {:.1} tok/s  ·  {:.1}s  ·  {} queued",
+                    commas(generated as u64),
+                    commas(max as u64),
+                    number(data, "/live/tok_s"),
+                    number(data, "/live/elapsed_s"),
+                    number(data, "/live/queued")
+                ),
+                None => format!(
+                    "Generating  {} tokens  ·  {:.1} tok/s  ·  {:.1}s  ·  {} queued",
+                    commas(number(data, "/live/generated") as u64),
+                    number(data, "/live/tok_s"),
+                    number(data, "/live/elapsed_s"),
+                    number(data, "/live/queued")
+                ),
+            }
         } else if state == "unloaded" {
             "Model unloaded · waiting for a request".into()
         } else {
             "Ready for the next request".into()
         };
         let (used, total) = if state == "reading" {
-            (
-                number(data, "/live/prompt_read") as u64,
-                number(data, "/live/prompt_total").max(number(data, "/live/prompt_tokens")) as u64,
-            )
+            app.metrics
+                .prefill_progress()
+                .map_or((0, 1), |(done, total)| (done as u64, total as u64))
         } else if state == "generating" {
-            (
-                number(data, "/live/generated") as u64,
-                number(data, "/live/max_tokens") as u64,
-            )
+            app.metrics
+                .decode_progress()
+                .map_or((0, 1), |(generated, max)| (generated as u64, max as u64))
         } else {
             (0, 1)
         };

@@ -622,7 +622,7 @@ pub fn attach(args: &Args) -> Result<i32> {
                     if control::epoch() - snapshot.metrics_at < 4.
                         && let Some(metrics) = &snapshot.metrics
                     {
-                        events.push(Event::Metrics(metrics.clone()));
+                        events.push(Event::Metrics(Box::new(metrics.clone())));
                     }
                     if let Some(hardware) = &snapshot.hardware {
                         events.push(Event::Hardware(Box::new(hardware.clone())));
@@ -632,10 +632,11 @@ pub fn attach(args: &Args) -> Result<i32> {
                 } else {
                     let api = api.as_ref().unwrap();
                     Ok(vec![
-                        Event::Metrics(model::Metrics::new(
+                        Event::Metrics(Box::new(model::Metrics::new(
                             api.get("/metrics")?,
                             api.get("/v1/status")?,
-                        )),
+                            api.get("/slots").unwrap_or(serde_json::Value::Null),
+                        ))),
                         Event::Hardware(Box::new(collector.sample())),
                     ])
                 }

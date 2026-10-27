@@ -1,7 +1,7 @@
 use crate::{
     Args,
     hardware::Collector,
-    model::{Event, Metrics, number, truth},
+    model::{Event, Metrics, number, text, truth},
     policy::{Resize, Sample},
 };
 use anyhow::{Context, Result, bail};
@@ -373,7 +373,13 @@ pub fn worker(args: &Args) -> Result<i32> {
         thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
                 let data = (|| -> Result<Metrics> {
-                    Ok(Metrics::new(api.get("/metrics")?, api.get("/v1/status")?))
+                    Ok(Metrics::new(
+                        api.get("/metrics")?,
+                        api.get("/v1/status")?,
+                        // The slot table needs the key; a refusal leaves the bars empty rather
+                        // than stopping the monitoring loop.
+                        api.get("/slots").unwrap_or(Value::Null),
+                    ))
                 })();
                 if tx
                     .send(Input::Metrics(data.map_err(|e| e.to_string())))
@@ -464,7 +470,7 @@ pub fn worker(args: &Args) -> Result<i32> {
                     state.metrics_at = crate::control::epoch();
                 }
                 policy.activity(data.activity(), data.busy());
-                emit(Event::Metrics(data.clone()));
+                emit(Event::Metrics(Box::new(data.clone())));
                 metrics = Some((data, Instant::now()));
             }
             Ok(Input::Metrics(Err(error))) => {
@@ -787,6 +793,21 @@ pub fn read_config(args: &Args) -> Result<Value> {
     Ok(value)
 }
 
+/// The request in flight: where its prompt has been read to, and how many tokens it has left
+/// to generate. Both come from the slot table, which `/metrics` does not carry.
+fn live_block(metrics: &Metrics) -> Value {
+    json!({
+        "state": text(&metrics.data, "/live/state"),
+        "elapsed_s": number(&metrics.data, "/live/elapsed_s"),
+        "prefill": metrics.prefill_progress().map_or(Value::Null, |(read, total)| {
+            json!({"read": read, "prompt_tokens": total})
+        }),
+        "decode": metrics.decode_progress().map_or(Value::Null, |(generated, max)| {
+            json!({"generated": generated, "max_tokens": max})
+        }),
+    })
+}
+
 pub fn diagnose(args: &Args) -> Result<i32> {
     if crate::control::socket_path(args).exists() {
         let snapshot: crate::control::Snapshot =
@@ -795,20 +816,25 @@ pub fn diagnose(args: &Args) -> Result<i32> {
             |m| json!({"busy":m.busy(),"cache_mib":m.cache(),"full_cache_mib":m.full_cache()}),
         );
         let gpu=snapshot.hardware.as_ref().map(|h|json!({"name":h.gpu_name,"total_mib":h.gpu_total>>20,"free_mib":h.gpu_free>>20,"used_mib":h.gpu_used>>20,"error":h.gpu_error}));
+        let live = snapshot.metrics.as_ref().map(live_block);
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({"source":"running-worker","read_only":true,
             "version":snapshot.version,"worker_pid":snapshot.worker_pid,"config_path":snapshot.config_path,"profile":snapshot.profile,
             "effective":snapshot.effective,"policy":snapshot.policy,"pending":snapshot.pending,"growth_paused":snapshot.growth_paused,
             "metrics_age_seconds":crate::control::epoch()-snapshot.metrics_at,"hardware_age_seconds":crate::control::epoch()-snapshot.hardware_at,
-            "engine":engine,"gpu":gpu,"resize_history":snapshot.resize_history}))?
+            "engine":engine,"live":live,"gpu":gpu,"resize_history":snapshot.resize_history}))?
         );
         return Ok(0);
     }
     let config = read_config(args)?;
     let port = crate::config::port(args, &config);
     let api = Api::new(port, &api_key())?;
-    let m = Metrics::new(api.get("/metrics")?, api.get("/v1/status")?);
+    let m = Metrics::new(
+        api.get("/metrics")?,
+        api.get("/v1/status")?,
+        api.get("/slots").unwrap_or(Value::Null),
+    );
     let index = args.gpu.as_deref().unwrap_or("0").parse::<u32>()?;
     let gpu = crate::hardware::gpus()?
         .into_iter()
@@ -851,6 +877,7 @@ pub fn diagnose(args: &Args) -> Result<i32> {
             "policy":{"growth_mode":args.growth_mode,"min_free_mib":args.min_free_mib,"grow_below_mib":args.grow_below_mib,
                 "grow_delay_seconds":args.grow_delay,"step_mib":args.step_mib,"accounting_margin_mib":args.accounting_margin_mib},
             "engine":{"busy":m.busy(),"cache_mib":m.cache(),"full_cache_mib":m.full_cache(),"activity":m.activity()},
+            "live":live_block(&m),
             "growth_blockers":reasons,
             "timing_note":"This snapshot cannot read the running worker's timer. Capacity mode waits for sustained spare VRAM; idle mode also waits for inference to stop. Basalt applies queued resizes between requests."
         }))?
@@ -1120,32 +1147,41 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let task = thread::spawn(move || {
-            for (i, mut request) in server.incoming_requests().take(4).enumerate() {
-                let reply = match i {
-                    0 => {
-                        assert_eq!(request.url(), "/metrics");
+            // Dispatch by URL: a poll is three GETs, and the resize replies follow in order.
+            let mut resizes = 0;
+            for mut request in server.incoming_requests() {
+                let reply = match request.url() {
+                    "/metrics" => {
                         json!({"live":{"state":"generating"},"requests":(0..40).map(|i|json!({"time":i})).collect::<Vec<_>>()})
                     }
-                    1 => {
-                        assert_eq!(request.url(), "/v1/status");
+                    "/v1/status" => {
                         json!({"loaded":true,"activity":{"in_flight":2,"requests":1},"vram":{"elastic":true,"expert_cache_mib":4096,"expert_cache_full_mib":8192}})
                     }
+                    "/slots" => json!([]),
                     _ => {
                         assert_eq!(request.url(), "/v1/vram");
                         let mut body = String::new();
                         request.as_reader().read_to_string(&mut body).unwrap();
                         let value: Value = serde_json::from_str(&body).unwrap();
-                        assert_eq!(value["reserve_mib"], if i == 2 { 2472 } else { 1028 });
-                        json!({"status":"ok","expert_cache_mib":if i==2 {4608}else{4096},"vram_free_mib":if i==2 {2488}else{1028}})
+                        resizes += 1;
+                        assert_eq!(value["reserve_mib"], if resizes == 1 { 2472 } else { 1028 });
+                        json!({"status":"ok","expert_cache_mib":if resizes==1 {4608}else{4096},"vram_free_mib":if resizes==1 {2488}else{1028}})
                     }
                 };
                 request
                     .respond(tiny_http::Response::from_string(reply.to_string()))
                     .unwrap();
+                if resizes == 2 {
+                    break;
+                }
             }
         });
         let api = Api::new(port, "").unwrap();
-        let mut m = Metrics::new(api.get("/metrics").unwrap(), api.get("/v1/status").unwrap());
+        let mut m = Metrics::new(
+            api.get("/metrics").unwrap(),
+            api.get("/v1/status").unwrap(),
+            api.get("/slots").unwrap(),
+        );
         assert_eq!(m.data["requests"].as_array().unwrap().len(), 40);
         let mut hw = crate::hardware::Hardware {
             gpu_total: 16384 << 20,
