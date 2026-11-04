@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -74,6 +74,10 @@ pub struct Hardware {
     pub swap_total: u64,
     pub swap_used: u64,
     pub cpu: f64,
+    #[serde(default)]
+    pub cpu_temp: Option<u32>,
+    #[serde(default)]
+    pub ram_temp: Option<u32>,
     pub threads: usize,
     pub cpu_name: String,
     pub model_pss: Option<u64>,
@@ -95,6 +99,8 @@ pub struct Collector {
     last: Instant,
     memory_at: Option<Instant>,
     model_memory: [Option<u64>; 5],
+    temp_paths: (Option<PathBuf>, Vec<PathBuf>),
+    temp_at: Option<Instant>,
 }
 
 impl Collector {
@@ -108,6 +114,8 @@ impl Collector {
             last: Instant::now(),
             memory_at: None,
             model_memory: [None; 5],
+            temp_paths: (None, Vec::new()),
+            temp_at: None,
         }
     }
     pub fn sample(&mut self) -> Hardware {
@@ -136,6 +144,12 @@ impl Collector {
             0.0
         };
         self.cpu_prev = (total, idle);
+        if self.temp_at.is_none_or(|t| t.elapsed().as_secs() >= 30) {
+            self.temp_paths = temp_paths();
+            self.temp_at = Some(Instant::now());
+        }
+        hw.cpu_temp = self.temp_paths.0.as_deref().and_then(read_temp);
+        hw.ram_temp = self.temp_paths.1.iter().filter_map(|p| read_temp(p)).max();
         let disk = disk_bytes();
         hw.disk_read = disk.0.saturating_sub(self.disk_prev.0) as f64 / elapsed / 1048576.0;
         hw.disk_write = disk.1.saturating_sub(self.disk_prev.1) as f64 / elapsed / 1048576.0;
@@ -304,6 +318,47 @@ fn cpu_times() -> (u64, u64) {
         values.get(3).unwrap_or(&0) + values.get(4).unwrap_or(&0),
     )
 }
+// hwmon names that expose package/CPU temperature: AMD, Intel, and generic
+// SoC drivers all report the primary reading as temp1_input.
+const CPU_SENSORS: [&str; 5] = [
+    "k10temp",
+    "coretemp",
+    "zenpower",
+    "cpu_thermal",
+    "soc_thermal",
+];
+fn temp_paths() -> (Option<PathBuf>, Vec<PathBuf>) {
+    temp_paths_in(Path::new("/sys/class/hwmon"))
+}
+fn temp_paths_in(dir: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut cpu = None;
+    let mut ram = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return (cpu, ram);
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let name = fs::read_to_string(dir.join("name"))
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        let input = dir.join("temp1_input");
+        if cpu.is_none() && CPU_SENSORS.contains(&name.as_str()) && input.exists() {
+            cpu = Some(input);
+        } else if name == "spd5118" {
+            // DDR5 SPD hub temperature sensor, one hwmon device per DIMM.
+            ram.push(input);
+        }
+    }
+    (cpu, ram)
+}
+fn read_temp(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .map(|milli| (milli as f64 / 1000.).round().max(0.) as u32)
+}
 fn disk_bytes() -> (u64, u64) {
     let mut result = (0, 0);
     for line in fs::read_to_string("/proc/diskstats")
@@ -367,6 +422,8 @@ impl Hardware {
             swap_total: 112 * gb,
             swap_used: 6 * gb,
             cpu: 42.7,
+            cpu_temp: Some(64),
+            ram_temp: Some(48),
             threads: 16,
             cpu_name: "AMD Ryzen 7 9800X3D".into(),
             model_pss: Some(49 * gb + gb / 2),
@@ -424,6 +481,39 @@ impl Hardware {
 mod tests {
     use super::*;
 
+    #[test]
+    fn temp_paths_find_cpu_and_dimm_sensors() {
+        let root = std::env::temp_dir().join(format!("basalt-wrap-hwmon-{}", std::process::id()));
+        let sensor = |dir: &str, name: &str, millidegrees: i64| {
+            let dir = root.join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("name"), format!("{name}\n")).unwrap();
+            std::fs::write(dir.join("temp1_input"), format!("{millidegrees}\n")).unwrap();
+        };
+        sensor("hwmon0", "nvme", 40_000);
+        sensor("hwmon1", "k10temp", 74_125);
+        sensor("hwmon2", "spd5118", 53_400);
+        sensor("hwmon3", "spd5118", 51_250);
+        let (cpu, ram) = temp_paths_in(&root);
+        assert_eq!(read_temp(cpu.as_deref().unwrap()), Some(74));
+        let mut ram: Vec<_> = ram.iter().filter_map(|p| read_temp(p)).collect();
+        ram.sort();
+        assert_eq!(ram, [51, 53]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+    #[test]
+    #[ignore = "reads this machine's hwmon sensors"]
+    fn live_hwmon_sensors_are_readable() {
+        let (cpu, ram) = temp_paths();
+        assert!(
+            cpu.as_deref().and_then(read_temp).is_some(),
+            "no cpu temperature sensor"
+        );
+        assert!(
+            ram.iter().filter_map(|p| read_temp(p)).max().is_some(),
+            "no dimm temperature sensor"
+        );
+    }
     #[test]
     fn live_nvml_sample_accounts_for_reserved_memory() {
         // Captured from the affected GPU in one nvmlDeviceGetMemoryInfo_v2 call.

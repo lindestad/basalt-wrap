@@ -657,6 +657,7 @@ impl Ui {
             );
         }
         let right = self.inside(f, cols[1], "System memory & CPU");
+        let ram_temp = hw.ram_temp.map(|t| format!(" · {t}°C")).unwrap_or_default();
         self.gauge(
             f,
             right,
@@ -664,14 +665,14 @@ impl Ui {
             hw.ram_total,
             if right.width < 44 {
                 format!(
-                    "RAM {}/{}G · {}G avail",
+                    "RAM {}/{}G · {}G avail{ram_temp}",
                     gib(hw.ram_used),
                     gib(hw.ram_total),
                     gib(hw.ram_available)
                 )
             } else {
                 format!(
-                    "RAM {} / {} GiB   {} available",
+                    "RAM {} / {} GiB   {} available{ram_temp}",
                     gib(hw.ram_used),
                     gib(hw.ram_total),
                     gib(hw.ram_available)
@@ -700,6 +701,17 @@ impl Ui {
             2,
             Line::from(vec![
                 self.dim(format!("CPU {:.0}%", hw.cpu)),
+                match hw.cpu_temp {
+                    Some(t) => value(
+                        format!(" · {t}°C"),
+                        if t >= 85 {
+                            self.palette.warning
+                        } else {
+                            self.palette.fg
+                        },
+                    ),
+                    None => value(String::new(), self.palette.fg),
+                },
                 value(
                     format!(
                         "  read {:.0} · write {:.1} MiB/s",
@@ -1914,6 +1926,9 @@ mod tests {
             "Context",
         ] {
             assert!(text.contains(label), "missing {label}");
+        }
+        for temp in ["64°C", "48°C"] {
+            assert!(text.contains(temp), "missing temperature {temp}");
         }
     }
     #[test]
