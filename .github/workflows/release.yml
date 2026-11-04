@@ -61,7 +61,7 @@ jobs:
         run: |
           mkdir dist
           cp "target/${TARGET}/release/basalt-wrap" README.md LICENSE AI_SETUP.md CONTRIBUTING.md CHANGELOG.md dist/
-          cp -r examples docs dist/
+          cp -r examples dist/
           archive="basalt-wrap-${GITHUB_REF_NAME}-${TARGET}.tar.gz"
           tar -C dist -czf "$archive" .
           sha256sum "$archive" > "$archive.sha256"
