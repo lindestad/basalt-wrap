@@ -319,16 +319,22 @@ fn cpu_times() -> (u64, u64) {
     )
 }
 // hwmon names that expose package/CPU temperature: AMD, Intel, and generic
-// SoC drivers all report the primary reading as temp1_input.
-const CPU_SENSORS: [&str; 5] = [
+// SoC drivers, plus the older AMD driver.
+const CPU_SENSORS: [&str; 6] = [
     "k10temp",
     "coretemp",
     "zenpower",
+    "k8temp",
     "cpu_thermal",
     "soc_thermal",
 ];
+// Thermal zone types used when no hwmon driver matched: Intel's legacy
+// package driver and the names ARM boards give their CPU zones.
+const CPU_ZONES: [&str; 4] = ["x86_pkg_temp", "cpu_thermal", "cpu-thermal", "soc_thermal"];
 fn temp_paths() -> (Option<PathBuf>, Vec<PathBuf>) {
-    temp_paths_in(Path::new("/sys/class/hwmon"))
+    let (cpu, ram) = temp_paths_in(Path::new("/sys/class/hwmon"));
+    let cpu = cpu.or_else(|| thermal_cpu_path_in(Path::new("/sys/class/thermal")));
+    (cpu, ram)
 }
 fn temp_paths_in(dir: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
     let mut cpu = None;
@@ -341,15 +347,68 @@ fn temp_paths_in(dir: &Path) -> (Option<PathBuf>, Vec<PathBuf>) {
         let name = fs::read_to_string(dir.join("name"))
             .map(|s| s.trim().to_owned())
             .unwrap_or_default();
-        let input = dir.join("temp1_input");
-        if cpu.is_none() && CPU_SENSORS.contains(&name.as_str()) && input.exists() {
-            cpu = Some(input);
+        if cpu.is_none() && CPU_SENSORS.contains(&name.as_str()) {
+            cpu = cpu_sensor_input(&dir);
         } else if name == "spd5118" {
             // DDR5 SPD hub temperature sensor, one hwmon device per DIMM.
-            ram.push(input);
+            ram.push(dir.join("temp1_input"));
         }
     }
     (cpu, ram)
+}
+// Drivers label the package reading: k10temp's Tctl, coretemp's package,
+// soc_thermal's "physical". Fall back to the primary sensor where unlabeled.
+fn cpu_sensor_input(dir: &Path) -> Option<PathBuf> {
+    for entry in fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let Some(stem) = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|f| f.strip_prefix("temp"))
+            .and_then(|f| f.strip_suffix("_label"))
+        else {
+            continue;
+        };
+        let label = fs::read_to_string(&path)
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        let package = ["Tctl", "Tdie", "physical"].contains(&label.as_str())
+            || label.contains("Package")
+            || label.contains("CPU");
+        if package {
+            let input = dir.join(format!("temp{stem}_input"));
+            if input.exists() {
+                return Some(input);
+            }
+        }
+    }
+    let input = dir.join("temp1_input");
+    input.exists().then_some(input)
+}
+fn thermal_cpu_path_in(dir: &Path) -> Option<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|name| name.starts_with("thermal_zone"))
+        {
+            continue;
+        }
+        let kind = fs::read_to_string(dir.join("type"))
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_default();
+        if CPU_ZONES.contains(&kind.as_str()) {
+            let input = dir.join("temp");
+            if input.exists() {
+                return Some(input);
+            }
+        }
+    }
+    None
 }
 fn read_temp(path: &Path) -> Option<u32> {
     fs::read_to_string(path)
@@ -484,21 +543,62 @@ mod tests {
     #[test]
     fn temp_paths_find_cpu_and_dimm_sensors() {
         let root = std::env::temp_dir().join(format!("basalt-wrap-hwmon-{}", std::process::id()));
-        let sensor = |dir: &str, name: &str, millidegrees: i64| {
+        let sensor = |dir: &str, name: &str, temp: u32, label: Option<&str>, millidegrees: i64| {
             let dir = root.join(dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("name"), format!("{name}\n")).unwrap();
-            std::fs::write(dir.join("temp1_input"), format!("{millidegrees}\n")).unwrap();
+            std::fs::write(
+                dir.join(format!("temp{temp}_input")),
+                format!("{millidegrees}\n"),
+            )
+            .unwrap();
+            if let Some(label) = label {
+                std::fs::write(dir.join(format!("temp{temp}_label")), format!("{label}\n"))
+                    .unwrap();
+            }
         };
-        sensor("hwmon0", "nvme", 40_000);
-        sensor("hwmon1", "k10temp", 74_125);
-        sensor("hwmon2", "spd5118", 53_400);
-        sensor("hwmon3", "spd5118", 51_250);
+        sensor("hwmon0", "nvme", 1, None, 40_000);
+        sensor("hwmon1", "k10temp", 1, Some("Tctl"), 74_125);
+        sensor("hwmon1", "k10temp", 3, Some("Tccd1"), 74_625);
+        sensor("hwmon2", "spd5118", 1, None, 53_400);
+        sensor("hwmon3", "spd5118", 1, None, 51_250);
         let (cpu, ram) = temp_paths_in(&root);
         assert_eq!(read_temp(cpu.as_deref().unwrap()), Some(74));
         let mut ram: Vec<_> = ram.iter().filter_map(|p| read_temp(p)).collect();
         ram.sort();
         assert_eq!(ram, [51, 53]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+    #[test]
+    fn temp_paths_prefer_the_labeled_package_sensor() {
+        let root = std::env::temp_dir().join(format!("basalt-wrap-package-{}", std::process::id()));
+        let dir = root.join("hwmon0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("name"), "coretemp\n").unwrap();
+        std::fs::write(dir.join("temp1_input"), "75000\n").unwrap();
+        std::fs::write(dir.join("temp1_label"), "Core 0\n").unwrap();
+        std::fs::write(dir.join("temp2_input"), "82000\n").unwrap();
+        std::fs::write(dir.join("temp2_label"), "Package id 0\n").unwrap();
+        let (cpu, ram) = temp_paths_in(&root);
+        assert_eq!(read_temp(cpu.as_deref().unwrap()), Some(82));
+        assert!(ram.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+    #[test]
+    fn temp_paths_fall_back_to_cpu_thermal_zones() {
+        let root = std::env::temp_dir().join(format!("basalt-wrap-zones-{}", std::process::id()));
+        let zone = |name: &str, kind: &str, millidegrees: i64| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("type"), format!("{kind}\n")).unwrap();
+            std::fs::write(dir.join("temp"), format!("{millidegrees}\n")).unwrap();
+        };
+        zone("thermal_zone0", "acpitz", 30_000);
+        zone("thermal_zone1", "x86_pkg_temp", 61_400);
+        assert_eq!(
+            thermal_cpu_path_in(&root).as_deref().and_then(read_temp),
+            Some(61)
+        );
         std::fs::remove_dir_all(&root).ok();
     }
     #[test]
