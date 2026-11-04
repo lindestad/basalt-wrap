@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Show CPU and DDR5 DIMM temperatures in the System memory & CPU panel: the hwmon package sensor, chosen by labels such as `Tctl` or the coretemp package entry, with a fallback to the thermal zone Intel's legacy driver and ARM boards expose; and the per-DIMM `spd5118` sensors. Panels omit temperatures where no matching sensor exists — DDR4 DIMMs carry none.
+
 ## 0.1.0
 
 - Fork strata-wrap 0.3.0 for Basalt's `bin/basalt serve` launcher and nested model configuration.
@@ -12,5 +16,4 @@
 - Count the session from the server's start, not the wrapper's, so an attachment shows the session it joined; follow the running server's log from an attachment, over the worker's file or the server's `/api/logs`.
 - Show the session's token cost in the header, at the model config's `pricing` rates: cached prompt tokens at the cache-read rate, the rest at prompt and completion rates. A `≥` marks the figure as a floor when history is incomplete.
 - Show the conversation cache live — parked conversations, bytes against the budget, restores and evictions — from the `conversation_cache` block the updated server adds to `/metrics`; older servers keep the budget-and-slots fallback.
-- Show CPU and DDR5 DIMM temperatures in the System memory & CPU panel, from the hwmon `k10temp`/`coretemp` family and the per-DIMM `spd5118` sensors; panels omit them where no sensor exists.
 - Make installation link only the launcher, preserving model configs and shell bindings.
